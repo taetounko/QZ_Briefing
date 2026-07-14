@@ -34,6 +34,19 @@ $env:PYTHONPATH = "$PWD\src"
 .\.venv\Scripts\python.exe -m qz_briefing.diagnostics.qax_environment_check
 ```
 
+## 키움 OpenAPI+ OCX 연결상태 검사
+
+로그인창을 띄우지 않고 키움 OpenAPI+ OCX 탑재, API 모듈 경로, 현재 연결상태 읽기까지만 검사한다.
+
+```powershell
+$env:PYTHONPATH = "$PWD\src"
+.\.venv\Scripts\python.exe -m qz_briefing.diagnostics.kiwoom_ocx_check
+```
+
+- Connection state `0`: OCX는 정상이나 OpenAPI 서버에는 미연결
+- Connection state `1`: OpenAPI 서버 연결완료
+- 상태 `0`도 이번 OCX 환경검사 자체는 성공으로 판정한다.
+
 ## 프로젝트 구조
 
 - `src/qz_briefing/`: 애플리케이션 소스 패키지

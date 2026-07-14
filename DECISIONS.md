@@ -34,3 +34,10 @@
 - Windows 네이티브 환경을 사용한다.
 - 빈 `QAxWidget` 객체 생성까지 환경 검증을 완료했다.
 - 주문 기능은 포함하지 않는다.
+
+## D-007 키움 OpenAPI+ OCX 연결상태 검사
+
+- 키움 OpenAPI+ 컨트롤 식별자로 `KHOPENAPI.KHOpenAPICtrl.1`을 사용한다.
+- 실제 로그인 전에 `GetConnectState`로 연결상태를 먼저 검사한다.
+- 연결상태 `0`은 환경오류가 아니라 미접속 상태로 구분한다.
+- 이번 단계에서는 `CommConnect`를 호출하지 않는다.
