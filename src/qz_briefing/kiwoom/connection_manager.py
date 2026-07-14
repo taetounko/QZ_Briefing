@@ -42,6 +42,11 @@ class KiwoomConnectionManager:
         return self._state
 
     @property
+    def config(self) -> ConnectionConfig:
+        """Return the immutable timing and retry configuration."""
+        return self._config
+
+    @property
     def reconnect_attempts(self) -> int:
         return self._reconnect_attempts
 

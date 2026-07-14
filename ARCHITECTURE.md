@@ -1,5 +1,11 @@
 # 아키텍처
 
+## Qt 상주 연결 런타임
+
+`QtConnectionRuntime`는 향후 실행 진입점이 소유하는 `QApplication`과 데이터 수집기 사이의 실행 계층이다. 런타임의 `QTimer`는 `KiwoomConnectionManager.tick()`을 주기적으로 호출한다.
+
+OCX 호출은 `KiwoomQAxAdapter`, 재접속 정책은 `KiwoomConnectionManager`, 타이머와 시작·종료 생명주기는 `QtConnectionRuntime`으로 분리한다. 데이터 수집기는 이 연결 경계 위에 별도 계층으로 추가한다.
+
 ## 현재 구조
 
 ```text
