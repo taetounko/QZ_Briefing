@@ -25,6 +25,15 @@ python -c "import struct; print(struct.calcsize('P') * 8)"
 
 버전은 Python 3.11, 비트 수는 32로 확인되어야 한다. 환경 검증과 외부 패키지 도입은 `TASKS.md` 순서에 따라 별도 작업으로 진행한다.
 
+## PyQt5 및 QAxWidget 환경 검사
+
+프로젝트 루트의 Windows PowerShell에서 다음과 같이 실행한다. 이벤트 루프나 창을 실행하지 않고 빈 `QAxWidget` 생성까지만 확인한다.
+
+```powershell
+$env:PYTHONPATH = "$PWD\src"
+.\.venv\Scripts\python.exe -m qz_briefing.diagnostics.qax_environment_check
+```
+
 ## 프로젝트 구조
 
 - `src/qz_briefing/`: 애플리케이션 소스 패키지

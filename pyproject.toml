@@ -4,4 +4,4 @@ version = "0.1.0"
 description = "키움 OpenAPI+ 기반 국내 증시 브리핑 전용 프로그램"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
-dependencies = []
+dependencies = ["PyQt5==5.15.11"]
