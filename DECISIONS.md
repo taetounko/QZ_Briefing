@@ -41,3 +41,14 @@
 - 실제 로그인 전에 `GetConnectState`로 연결상태를 먼저 검사한다.
 - 연결상태 `0`은 환경오류가 아니라 미접속 상태로 구분한다.
 - 이번 단계에서는 `CommConnect`를 호출하지 않는다.
+
+## D-008 키움 OpenAPI+ 로그인 연결 이벤트 검사
+
+- 실행 시 `GetConnectState`를 먼저 확인한다.
+- 연결상태가 `0`일 때만 `CommConnect`를 한 번 호출한다.
+- 로그인 대기에는 별도의 `QEventLoop`를 사용한다.
+- QApplication 전체 종료와 로그인 이벤트 루프 종료를 분리한다.
+- `OnEventConnect` 이벤트로 로그인 성공 여부를 확정한다.
+- `OnEventConnect` 성공 후 `GetConnectState`가 `1`인지 다시 확인한다.
+- 인증정보는 키움 로그인창에서만 입력하고 프로그램에 저장하지 않는다.
+- 현재 단계에서는 반복 재접속을 구현하지 않는다.
