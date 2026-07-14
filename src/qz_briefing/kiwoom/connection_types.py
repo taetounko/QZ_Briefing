@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 
 class ConnectionState(Enum):
@@ -35,6 +35,7 @@ class ConnectionConfig:
             raise ValueError("max_reconnect_attempts must be at least 1")
 
 
+@runtime_checkable
 class KiwoomConnection(Protocol):
     """Minimal connection-only boundary implemented later by an OCX adapter."""
 
