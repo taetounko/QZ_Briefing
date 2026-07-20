@@ -13,12 +13,15 @@ from qz_briefing.briefing import (
     BriefingStorage,
     BriefingType,
     DailyBriefingPipeline,
+    KiwoomDerivativesDataSource,
+    KiwoomDerivativesFlowCollector,
     KiwoomCoreMarketCollector,
     KiwoomMarketIndexCollector,
     KiwoomMarketIndexDataSource,
     KiwoomInvestorFlowCollector,
     KiwoomInvestorFlowDataSource,
     KiwoomStockBasicDataSource,
+    UnavailableFuturesContractResolver,
 )
 from qz_briefing.kiwoom import (
     ConnectionState,
@@ -100,6 +103,11 @@ def create_briefing_pipeline(
             ),
             KiwoomInvestorFlowCollector(
                 KiwoomInvestorFlowDataSource(tr_queue), clock=clock
+            ),
+            KiwoomDerivativesFlowCollector(
+                UnavailableFuturesContractResolver(),
+                KiwoomDerivativesDataSource(tr_queue),
+                clock=clock,
             ),
         ],
         clock=clock,
