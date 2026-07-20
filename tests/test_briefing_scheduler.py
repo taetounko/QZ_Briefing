@@ -106,7 +106,10 @@ def test_stop_cancels_all_scheduled_timers() -> None:
         timers.append(timer)
         return timer
 
-    scheduler = BriefingScheduler(timer_factory=make_timer)
+    scheduler = BriefingScheduler(
+        {PRE_MARKET: lambda: None, INTRADAY_10AM: lambda: None},
+        timer_factory=make_timer,
+    )
     scheduler.schedule(datetime(2026, 7, 20, 7, 30))
     scheduler.stop()
     scheduler.stop()
@@ -115,10 +118,15 @@ def test_stop_cancels_all_scheduled_timers() -> None:
     assert [timer.stop_count for timer in timers] == [1, 1]
 
 
-def test_default_placeholder_logs_intraday_task_name(capsys: object) -> None:
-    scheduler = BriefingScheduler()
+def test_injected_callback_runs_for_intraday_task() -> None:
+    calls: list[str] = []
+    scheduler = BriefingScheduler(
+        {
+            PRE_MARKET: lambda: calls.append(PRE_MARKET),
+            INTRADAY_10AM: lambda: calls.append(INTRADAY_10AM),
+        }
+    )
 
     scheduler.schedule(datetime(2026, 7, 20, 10, 0))
 
-    output = capsys.readouterr().out  # type: ignore[attr-defined]
-    assert "briefing task placeholder: intraday_10am" in output
+    assert calls == [INTRADAY_10AM]

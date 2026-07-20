@@ -1,0 +1,201 @@
+"""Fault-isolated daily briefing execution pipeline."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Callable, Sequence
+from datetime import date, datetime
+
+from .collectors import BriefingCollector
+from .models import (
+    SCHEMA_VERSION,
+    BriefingContext,
+    BriefingRunResult,
+    BriefingType,
+)
+from .renderer import render_markdown
+from .storage import BriefingStorage
+
+
+FINAL_STATUSES = {"completed", "completed_with_errors"}
+LOGGER = logging.getLogger(__name__)
+
+
+class DailyBriefingPipeline:
+    def __init__(
+        self,
+        storage: BriefingStorage,
+        collectors: Sequence[BriefingCollector],
+        *,
+        clock: Callable[[], datetime] = datetime.now,
+    ) -> None:
+        self._storage = storage
+        self._collectors = tuple(collectors)
+        self._clock = clock
+        self._in_progress: set[tuple[date, BriefingType]] = set()
+        self._completed: set[tuple[date, BriefingType]] = set()
+
+    def run(
+        self,
+        briefing_type: BriefingType,
+        trading_date: date,
+        *,
+        market_calendar_status: str,
+        market_calendar_reason: str,
+        market_calendar_warning: str | None = None,
+    ) -> BriefingRunResult:
+        key = (trading_date, briefing_type)
+        if key in self._in_progress or key in self._completed:
+            print("briefing already completed", flush=True)
+            return BriefingRunResult("skipped", briefing_type, trading_date)
+
+        completed, existing_warning = self._validate_existing_result(
+            trading_date, briefing_type
+        )
+        if completed:
+            self._completed.add(key)
+            print("briefing already completed", flush=True)
+            return BriefingRunResult("skipped", briefing_type, trading_date)
+
+        self._in_progress.add(key)
+        try:
+            requested_at = self._clock()
+            context = BriefingContext(
+                briefing_type=briefing_type,
+                trading_date=trading_date,
+                requested_at=requested_at,
+                started_at=self._clock(),
+                market_calendar_status=market_calendar_status,
+                market_calendar_reason=market_calendar_reason,
+                market_calendar_warning=market_calendar_warning,
+            )
+            if market_calendar_warning:
+                context.warnings.append(market_calendar_warning)
+            if existing_warning:
+                context.warnings.append(existing_warning)
+
+            print(f"briefing pipeline started: {briefing_type.value}", flush=True)
+            prior_pre_market = self._load_pre_market(context)
+            collector_results: dict[str, dict[str, object]] = {}
+            for collector in self._collectors:
+                print(f"briefing collector started: {collector.name}", flush=True)
+                try:
+                    data = collector.collect(context)
+                    collector_results[collector.name] = {
+                        "status": "success",
+                        "data": data,
+                        "error": None,
+                    }
+                    print(
+                        f"briefing collector completed: {collector.name}", flush=True
+                    )
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+                    context.errors.append(f"{collector.name}: {error}")
+                    collector_results[collector.name] = {
+                        "status": "error",
+                        "data": {},
+                        "error": error,
+                    }
+                    LOGGER.exception("briefing collector failed: %s", collector.name)
+                    print(f"briefing collector failed: {collector.name}", flush=True)
+
+            context.completed_at = self._clock()
+            status = "completed_with_errors" if context.errors else "completed"
+            result: dict[str, object] = {
+                "schema_version": SCHEMA_VERSION,
+                "briefing_type": briefing_type.value,
+                "trading_date": trading_date.isoformat(),
+                "requested_at": context.requested_at.isoformat(),
+                "started_at": context.started_at.isoformat(),
+                "completed_at": context.completed_at.isoformat(),
+                "status": status,
+                "market_calendar": {
+                    "status": market_calendar_status,
+                    "reason": market_calendar_reason,
+                    "warning": market_calendar_warning,
+                },
+                "collectors": collector_results,
+                "pre_market_result": prior_pre_market,
+                "warnings": context.warnings,
+                "errors": context.errors,
+            }
+            json_path, markdown_path = self._storage.save(
+                trading_date, briefing_type, result, render_markdown(result)
+            )
+            self._completed.add(key)
+            print(f"briefing result saved: {json_path}", flush=True)
+            print(f"briefing pipeline completed: {briefing_type.value}", flush=True)
+            return BriefingRunResult(
+                status,
+                briefing_type,
+                trading_date,
+                str(json_path),
+                str(markdown_path),
+            )
+        finally:
+            self._in_progress.discard(key)
+
+    def _validate_existing_result(
+        self, trading_date: date, briefing_type: BriefingType
+    ) -> tuple[bool, str | None]:
+        json_exists, markdown_exists = self._storage.result_files_exist(
+            trading_date, briefing_type
+        )
+        if not json_exists and not markdown_exists:
+            return False, None
+        if not json_exists:
+            return False, (
+                "Existing briefing result is incomplete and will be replaced: "
+                f"json_exists={json_exists}, markdown_exists={markdown_exists}"
+            )
+        try:
+            existing = self._storage.load_json(trading_date, briefing_type)
+        except (OSError, ValueError) as exc:
+            return False, (
+                "Existing briefing result could not be read and will be replaced: "
+                f"{type(exc).__name__}: {exc}"
+            )
+        if not markdown_exists:
+            return False, (
+                "Existing briefing result is incomplete and will be replaced: "
+                f"json_exists={json_exists}, markdown_exists={markdown_exists}"
+            )
+        expected = {
+            "schema_version": SCHEMA_VERSION,
+            "briefing_type": briefing_type.value,
+            "trading_date": trading_date.isoformat(),
+        }
+        for field, expected_value in expected.items():
+            if existing.get(field) != expected_value:
+                return False, (
+                    "Existing briefing result is invalid and will be replaced: "
+                    f"{field}={existing.get(field)!r}, expected={expected_value!r}"
+                )
+        if existing.get("status") not in FINAL_STATUSES:
+            return False, (
+                "Existing briefing result is not complete and will be replaced: "
+                f"status={existing.get('status')!r}"
+            )
+        return True, None
+
+    def _load_pre_market(self, context: BriefingContext) -> dict[str, object] | None:
+        if context.briefing_type is not BriefingType.INTRADAY_10AM:
+            return None
+        try:
+            result = self._storage.load_json(
+                context.trading_date, BriefingType.PRE_MARKET
+            )
+            if result is None:
+                raise FileNotFoundError("pre_market.json does not exist")
+            print("pre-market result loaded", flush=True)
+            return {
+                "exists": True,
+                "status": result.get("status"),
+                "completed_at": result.get("completed_at"),
+            }
+        except (OSError, ValueError) as exc:
+            warning = f"Pre-market result unavailable: {type(exc).__name__}: {exc}"
+            context.warnings.append(warning)
+            print("pre-market result unavailable", flush=True)
+            return {"exists": False, "status": None, "completed_at": None}

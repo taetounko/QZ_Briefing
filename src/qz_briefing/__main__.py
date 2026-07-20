@@ -9,6 +9,12 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Protocol
 
+from qz_briefing.briefing import (
+    BriefingStorage,
+    BriefingType,
+    DailyBriefingPipeline,
+    PlaceholderCollector,
+)
 from qz_briefing.kiwoom import (
     ConnectionTransition,
     KiwoomConnectionManager,
@@ -53,13 +59,28 @@ ShutdownControllerFactory = Callable[
     [ApplicationLike, ProcessLockLike], GracefulShutdownController
 ]
 MarketDayChecker = Callable[[date], TradingDayResult]
-BriefingSchedulerFactory = Callable[[], BriefingScheduler]
+BriefingSchedulerFactory = Callable[
+    [dict[str, Callable[[], None]]], BriefingScheduler
+]
 LocalClock = Callable[[], datetime]
+BriefingPipelineFactory = Callable[[LocalClock], DailyBriefingPipeline]
 
 
 def check_market_day(target_date: date) -> TradingDayResult:
     """Evaluate the maintained offline KRX calendar."""
     return load_market_calendar().evaluate(target_date)
+
+
+def create_briefing_pipeline(clock: LocalClock) -> DailyBriefingPipeline:
+    """Build one process-wide offline pipeline and its result storage."""
+    storage = BriefingStorage(
+        Path(__file__).resolve().parents[2] / "data" / "briefings"
+    )
+    return DailyBriefingPipeline(
+        storage,
+        [PlaceholderCollector(clock=clock)],
+        clock=clock,
+    )
 
 
 def create_single_instance_lock() -> ProcessLockLike:
@@ -164,6 +185,7 @@ def run(
     shutdown_controller_factory: ShutdownControllerFactory = GracefulShutdownController,
     market_day_checker: MarketDayChecker = check_market_day,
     briefing_scheduler_factory: BriefingSchedulerFactory = BriefingScheduler,
+    briefing_pipeline_factory: BriefingPipelineFactory = create_briefing_pipeline,
     clock: LocalClock = datetime.now,
 ) -> int:
     """Assemble the connection runtime and keep the Qt event loop running."""
@@ -208,7 +230,33 @@ def run(
             )
             return 0
 
-        briefing_scheduler = briefing_scheduler_factory()
+        pipeline = briefing_pipeline_factory(clock)
+
+        def run_briefing(briefing_type: BriefingType) -> None:
+            if shutdown_controller.shutdown_started:
+                print(
+                    f"briefing task skipped during shutdown: {briefing_type.value}",
+                    flush=True,
+                )
+                return
+            pipeline.run(
+                briefing_type,
+                now.date(),
+                market_calendar_status=trading_day.status.value,
+                market_calendar_reason=trading_day.reason,
+                market_calendar_warning=trading_day.warning,
+            )
+
+        briefing_scheduler = briefing_scheduler_factory(
+            {
+                BriefingType.PRE_MARKET.value: lambda: run_briefing(
+                    BriefingType.PRE_MARKET
+                ),
+                BriefingType.INTRADAY_10AM.value: lambda: run_briefing(
+                    BriefingType.INTRADAY_10AM
+                ),
+            }
+        )
         shutdown_controller.attach_briefing_scheduler(briefing_scheduler)
         briefing_scheduler.schedule(now)
 

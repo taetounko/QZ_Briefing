@@ -66,6 +66,10 @@ class FakeShutdownController:
         self.stopped = False
         self.request_count = 0
 
+    @property
+    def shutdown_started(self) -> bool:
+        return self.stopped
+
     def schedule(self) -> bool:
         return True
 
@@ -93,12 +97,26 @@ class FakeShutdownController:
 
 
 class FakeBriefingScheduler:
+    def __init__(self, callbacks: object) -> None:
+        self.callbacks = callbacks
+
     def schedule(self, now: datetime) -> tuple[object, ...]:
         del now
         return ()
 
     def stop(self) -> None:
         return None
+
+
+class FakeBriefingPipeline:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, object, dict[str, object]]] = []
+
+    def run(
+        self, briefing_type: object, trading_date: object, **kwargs: object
+    ) -> object:
+        self.calls.append((briefing_type, trading_date, kwargs))
+        return object()
 
 
 def run(*args: object, **kwargs: object) -> int:
@@ -194,6 +212,55 @@ class FakeConnection:
 
 
 class MainEntryPointTests(unittest.TestCase):
+    def test_scheduler_callback_invokes_shared_briefing_pipeline(self) -> None:
+        events: list[str] = []
+        pipeline = FakeBriefingPipeline()
+
+        class ImmediateBriefingScheduler(FakeBriefingScheduler):
+            def schedule(self, now: datetime) -> tuple[object, ...]:
+                del now
+                self.callbacks["pre_market"]()  # type: ignore[index]
+                return ()
+
+        exit_code = run(
+            [],
+            application_factory=lambda arguments: FakeApplication(events),
+            adapter_factory=FakeAdapter,  # type: ignore[arg-type]
+            manager_factory=lambda adapter: FakeManager(),  # type: ignore[arg-type]
+            runtime_factory=lambda *args, **kwargs: FakeRuntime(events),
+            lock_factory=FakeProcessLock,
+            briefing_scheduler_factory=ImmediateBriefingScheduler,
+            briefing_pipeline_factory=lambda clock: pipeline,
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(len(pipeline.calls), 1)
+        self.assertEqual(pipeline.calls[0][0].value, "pre_market")  # type: ignore[union-attr]
+
+    def test_briefing_callback_does_not_start_after_shutdown(self) -> None:
+        events: list[str] = []
+        pipeline = FakeBriefingPipeline()
+        schedulers: list[FakeBriefingScheduler] = []
+
+        def make_scheduler(callbacks: object) -> FakeBriefingScheduler:
+            scheduler = FakeBriefingScheduler(callbacks)
+            schedulers.append(scheduler)
+            return scheduler
+
+        run(
+            [],
+            application_factory=lambda arguments: FakeApplication(events),
+            adapter_factory=FakeAdapter,  # type: ignore[arg-type]
+            manager_factory=lambda adapter: FakeManager(),  # type: ignore[arg-type]
+            runtime_factory=lambda *args, **kwargs: FakeRuntime(events),
+            lock_factory=FakeProcessLock,
+            briefing_scheduler_factory=make_scheduler,
+            briefing_pipeline_factory=lambda clock: pipeline,
+        )
+
+        schedulers[0].callbacks["pre_market"]()  # type: ignore[index]
+        self.assertEqual(pipeline.calls, [])
+
     def test_unknown_calendar_warns_and_continues_runtime_startup(self) -> None:
         events: list[str] = []
         application = FakeApplication(events)

@@ -27,6 +27,7 @@ config/*
 !config/.gitkeep
 data/*
 !data/.gitkeep
+data/briefings/
 logs/*
 !logs/.gitkeep
 reports/*

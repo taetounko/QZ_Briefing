@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import Protocol
 
+from qz_briefing.briefing.models import BriefingType
 
-PRE_MARKET = "pre_market"
-INTRADAY_10AM = "intraday_10am"
+PRE_MARKET = BriefingType.PRE_MARKET.value
+INTRADAY_10AM = BriefingType.INTRADAY_10AM.value
 PRE_MARKET_TIME = time(8, 0)
 INTRADAY_TIME = time(10, 0)
 
@@ -78,29 +79,16 @@ def create_timer() -> TimerLike:
     return QTimer()
 
 
-def placeholder(name: str) -> BriefingCallback:
-    def run_placeholder() -> None:
-        print(f"briefing task placeholder: {name}", flush=True)
-
-    return run_placeholder
-
-
 class BriefingScheduler:
     """Execute each named briefing callback at most once per local date."""
 
     def __init__(
         self,
-        callbacks: Mapping[str, BriefingCallback] | None = None,
+        callbacks: Mapping[str, BriefingCallback],
         *,
         timer_factory: TimerFactory = create_timer,
     ) -> None:
-        self._callbacks = dict(
-            callbacks
-            or {
-                PRE_MARKET: placeholder(PRE_MARKET),
-                INTRADAY_10AM: placeholder(INTRADAY_10AM),
-            }
-        )
+        self._callbacks = dict(callbacks)
         self._timer_factory = timer_factory
         self._timers: list[TimerLike] = []
         self._executed: set[tuple[date, str]] = set()
