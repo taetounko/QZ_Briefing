@@ -1,5 +1,6 @@
 """Read-only core security collector tests using fake adapters."""
 
+import json
 from datetime import date, datetime
 from pathlib import Path
 
@@ -104,3 +105,40 @@ def test_one_security_failure_marks_pipeline_completed_with_errors(
         market_calendar_reason="weekday",
     )
     assert result.status == "completed_with_errors"
+
+
+def test_korean_names_and_opt10001_fields_are_preserved_in_json(
+    tmp_path: Path,
+) -> None:
+    collector = KiwoomCoreMarketCollector(
+        FakeStockBasicDataSource(), clock=lambda: NOW
+    )
+    pipeline = DailyBriefingPipeline(
+        BriefingStorage(tmp_path), [collector], clock=lambda: NOW
+    )
+    result = pipeline.run(
+        BriefingType.PRE_MARKET,
+        date(2026, 7, 21),
+        market_calendar_status="open",
+        market_calendar_reason="weekday",
+    )
+    saved_text = Path(result.json_path or "").read_text(encoding="utf-8")
+    saved = json.loads(saved_text)
+    securities = saved["collectors"]["kiwoom_core_market"]["data"]["securities"]
+
+    assert [item["name"] for item in securities] == ["삼성전자", "SK하이닉스"]
+    assert set(securities[0]["raw"]) == {
+        "종목코드",
+        "종목명",
+        "현재가",
+        "전일대비",
+        "등락율",
+        "시가",
+        "고가",
+        "저가",
+        "거래량",
+        "기준가",
+    }
+    assert "삼성전자" in saved_text
+    assert "SK하이닉스" in saved_text
+    assert "\\uc0bc\\uc131" not in saved_text.lower()

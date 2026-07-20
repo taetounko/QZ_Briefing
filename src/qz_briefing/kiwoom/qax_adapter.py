@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """QAxWidget adapter for the minimal Kiwoom connection protocol."""
 
 from __future__ import annotations

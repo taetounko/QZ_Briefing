@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Sequential, timeout-bounded read-only Kiwoom TR request queue."""
 
 from __future__ import annotations

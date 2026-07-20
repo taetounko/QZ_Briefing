@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Collector contract and offline placeholder implementation."""
 
 from __future__ import annotations
