@@ -44,11 +44,12 @@ def normalize_integer(raw_value: str, *, absolute: bool = False) -> int | None:
     return abs(value) if absolute else value
 
 
-def normalize_decimal(raw_value: str) -> float | None:
+def normalize_decimal(raw_value: str, *, absolute: bool = False) -> float | None:
     compact = str(raw_value).strip().replace(",", "")
     if not compact:
         return None
-    return float(compact)
+    value = float(compact)
+    return abs(value) if absolute else value
 
 
 STOCK_BASIC_FIELDS = (
@@ -254,12 +255,24 @@ class KiwoomMarketIndexCollector:
                 raw = self._data_source.get_market_index(market_code, industry_code)
                 item["raw"] = dict(raw)
                 normalizers = {
-                    "current": ("현재가", normalize_decimal),
+                    "current": (
+                        "현재가",
+                        lambda value: normalize_decimal(value, absolute=True),
+                    ),
                     "change": ("전일대비", normalize_decimal),
                     "change_rate": ("등락률", normalize_decimal),
-                    "open": ("시가", normalize_decimal),
-                    "high": ("고가", normalize_decimal),
-                    "low": ("저가", normalize_decimal),
+                    "open": (
+                        "시가",
+                        lambda value: normalize_decimal(value, absolute=True),
+                    ),
+                    "high": (
+                        "고가",
+                        lambda value: normalize_decimal(value, absolute=True),
+                    ),
+                    "low": (
+                        "저가",
+                        lambda value: normalize_decimal(value, absolute=True),
+                    ),
                     "volume": (
                         "거래량",
                         lambda value: normalize_integer(value, absolute=True),

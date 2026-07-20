@@ -43,10 +43,10 @@ class FakeMarketIndexDataSource:
             raise RuntimeError("index unavailable")
         if market_code == "0":
             return {
-                "현재가": " 2,845.12 ",
-                "전일대비": "-12.34",
-                "등락률": "-0.43",
-                "시가": "2,860.00",
+                "현재가": " -6516.27 ",
+                "전일대비": "-304.33",
+                "등락률": "-4.46",
+                "시가": "-6643.58",
                 "고가": "2,870.50",
                 "저가": "2,840.10",
                 "거래량": "1,234,567",
@@ -104,9 +104,12 @@ def test_index_values_preserve_decimals_signs_and_integer_totals() -> None:
     )
     result = collector.collect(context())
     kospi, kosdaq = result["indices"]
-    assert kospi["current"] == 2845.12
-    assert kospi["change"] == -12.34
-    assert kospi["change_rate"] == -0.43
+    assert kospi["current"] == 6516.27
+    assert kospi["open"] == 6643.58
+    assert kospi["change"] == -304.33
+    assert kospi["change_rate"] == -4.46
+    assert kospi["raw"]["현재가"] == " -6516.27 "
+    assert kospi["raw"]["시가"] == "-6643.58"
     assert kosdaq["change"] == 5.75
     assert kosdaq["change_rate"] == 0.68
     assert kospi["volume"] == 1_234_567
