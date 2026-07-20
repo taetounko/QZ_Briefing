@@ -19,7 +19,7 @@ from qz_briefing.__main__ import (  # noqa: E402
     ConsoleConnectionReporter,
     acquire_process_lock,
     main,
-    run,
+    run as application_run,
 )
 from qz_briefing.kiwoom import (  # noqa: E402
     ConnectionConfig,
@@ -44,11 +44,43 @@ class FakeApplication:
         self.aboutToQuit = FakeSignal()
         self.events = events
         self.exit_code = exit_code
+        self.quit_count = 0
 
     def exec_(self) -> int:
         self.events.append("exec")
         self.aboutToQuit.emit()
         return self.exit_code
+
+    def quit(self) -> None:
+        self.quit_count += 1
+
+
+class FakeShutdownController:
+    def __init__(self, application: object, process_lock: object) -> None:
+        del application
+        self.process_lock = process_lock
+        self.runtime: object | None = None
+        self.stopped = False
+
+    def schedule(self) -> bool:
+        return True
+
+    def attach_runtime(self, runtime: object) -> None:
+        self.runtime = runtime
+
+    def handle_application_quit(self) -> None:
+        if self.stopped:
+            return
+        self.stopped = True
+        if self.runtime is not None:
+            self.runtime.stop()  # type: ignore[attr-defined]
+        self.process_lock.unlock()  # type: ignore[attr-defined]
+
+
+def run(*args: object, **kwargs: object) -> int:
+    """Run entry-point tests with a deterministic non-Qt shutdown controller."""
+    kwargs.setdefault("shutdown_controller_factory", FakeShutdownController)
+    return application_run(*args, **kwargs)  # type: ignore[arg-type]
 
 
 class FakeAdapter:

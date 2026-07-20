@@ -14,6 +14,7 @@ from qz_briefing.kiwoom import (
     KiwoomQAxAdapter,
 )
 from qz_briefing.runtime import QtConnectionRuntime
+from qz_briefing.runtime.automatic_shutdown import GracefulShutdownController
 
 
 class SignalLike(Protocol):
@@ -24,6 +25,8 @@ class ApplicationLike(Protocol):
     aboutToQuit: SignalLike
 
     def exec_(self) -> int: ...
+
+    def quit(self) -> None: ...
 
 
 class ProcessLockLike(Protocol):
@@ -39,6 +42,9 @@ AdapterFactory = Callable[[], KiwoomQAxAdapter]
 ManagerFactory = Callable[[KiwoomQAxAdapter], KiwoomConnectionManager]
 RuntimeFactory = Callable[..., QtConnectionRuntime]
 LockFactory = Callable[[], ProcessLockLike]
+ShutdownControllerFactory = Callable[
+    [ApplicationLike, ProcessLockLike], GracefulShutdownController
+]
 
 
 def create_single_instance_lock() -> ProcessLockLike:
@@ -140,6 +146,7 @@ def run(
     manager_factory: ManagerFactory = KiwoomConnectionManager,
     runtime_factory: RuntimeFactory = QtConnectionRuntime,
     lock_factory: LockFactory = create_single_instance_lock,
+    shutdown_controller_factory: ShutdownControllerFactory = GracefulShutdownController,
 ) -> int:
     """Assemble the connection runtime and keep the Qt event loop running."""
     process_lock = lock_factory()
@@ -147,30 +154,37 @@ def run(
         print("QZ BRIEFING ALREADY RUNNING", flush=True)
         return 2
 
+    shutdown_controller: GracefulShutdownController | None = None
+    adapter: KiwoomQAxAdapter | None = None
+    runtime: QtConnectionRuntime | None = None
     try:
         application = application_factory(sys.argv if arguments is None else arguments)
         print(f"PROCESS PID: {os.getpid()}", flush=True)
         print("QAPPLICATION READY", flush=True)
+        shutdown_controller = shutdown_controller_factory(application, process_lock)
+        application.aboutToQuit.connect(shutdown_controller.handle_application_quit)
+        if not shutdown_controller.schedule():
+            return 0
+
         adapter = adapter_factory()
         print("KIWOOM OCX READY", flush=True)
-        runtime: QtConnectionRuntime | None = None
-        try:
-            manager = manager_factory(adapter)
-            reporter = ConsoleConnectionReporter(manager, adapter)
-            runtime = runtime_factory(adapter, manager, on_state_change=reporter)
-            application.aboutToQuit.connect(runtime.stop)
-            if not runtime.start():
-                raise RuntimeError("Kiwoom connection runtime did not start")
-            print("RUNTIME STARTED", flush=True)
-            return int(application.exec_())
-        finally:
-            if runtime is None:
-                adapter.close()
-            else:
-                runtime.stop()
-            print("RUNTIME STOPPED", flush=True)
+        manager = manager_factory(adapter)
+        reporter = ConsoleConnectionReporter(manager, adapter)
+        runtime = runtime_factory(adapter, manager, on_state_change=reporter)
+        shutdown_controller.attach_runtime(runtime)
+        if not runtime.start():
+            raise RuntimeError("Kiwoom connection runtime did not start")
+        print("RUNTIME STARTED", flush=True)
+        return int(application.exec_())
     finally:
-        process_lock.unlock()
+        if runtime is None and adapter is not None:
+            adapter.close()
+        if shutdown_controller is None:
+            process_lock.unlock()
+        else:
+            shutdown_controller.handle_application_quit()
+        if adapter is not None:
+            print("RUNTIME STOPPED", flush=True)
 
 
 def main() -> int:
