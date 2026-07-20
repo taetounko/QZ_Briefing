@@ -7,6 +7,7 @@ from collections.abc import Callable, Sequence
 from datetime import date, datetime
 
 from .collectors import BriefingCollector
+from .analysis import analyze_briefing
 from .models import (
     SCHEMA_VERSION,
     BriefingContext,
@@ -127,6 +128,15 @@ class DailyBriefingPipeline:
                 "warnings": context.warnings,
                 "errors": context.errors,
             }
+            pre_market_source = None
+            if briefing_type is BriefingType.INTRADAY_10AM:
+                try:
+                    pre_market_source = self._storage.load_json(
+                        trading_date, BriefingType.PRE_MARKET
+                    )
+                except (OSError, ValueError):
+                    pre_market_source = None
+            result["analysis"] = analyze_briefing(result, pre_market_source)
             json_path, markdown_path = self._storage.save(
                 trading_date, briefing_type, result, render_markdown(result)
             )

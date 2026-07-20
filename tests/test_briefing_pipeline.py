@@ -373,3 +373,33 @@ def test_intraday_continues_when_pre_market_is_unavailable(tmp_path: Path) -> No
     assert result.status == "completed"
     assert saved["pre_market_result"]["exists"] is False
     assert any("Pre-market result unavailable" in item for item in saved["warnings"])
+
+
+def test_pipeline_saves_analysis_without_changing_collector_payload(
+    tmp_path: Path,
+) -> None:
+    original = {
+        "collector": "kiwoom_market_indices",
+        "indices": [{"market": "KOSPI", "change_rate": 1.25, "raw": {"등락률": "+1.25"}}],
+        "warnings": [],
+        "errors": [],
+    }
+
+    class AnalysisCollector:
+        name = "kiwoom_market_indices"
+
+        def collect(self, context: BriefingContext) -> dict[str, object]:
+            return original
+
+    storage = BriefingStorage(tmp_path)
+    pipeline = DailyBriefingPipeline(storage, [AnalysisCollector()], clock=lambda: NOW)
+    pipeline.run(
+        BriefingType.PRE_MARKET,
+        TRADING_DATE,
+        market_calendar_status="open",
+        market_calendar_reason="weekday",
+    )
+    saved = load_result(storage, BriefingType.PRE_MARKET)
+    assert saved["analysis"]["market_state"] == "insufficient_data"
+    assert saved["collectors"]["kiwoom_market_indices"]["data"] == original
+    assert original["indices"][0]["raw"]["등락률"] == "+1.25"
