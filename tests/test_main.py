@@ -6,6 +6,7 @@ import contextlib
 import io
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -25,6 +26,7 @@ from qz_briefing.kiwoom import (  # noqa: E402
     ConnectionConfig,
     KiwoomConnectionManager,
 )
+from qz_briefing.scheduling import MarketStatus, TradingDayResult  # noqa: E402
 
 
 class FakeSignal:
@@ -60,7 +62,9 @@ class FakeShutdownController:
         del application
         self.process_lock = process_lock
         self.runtime: object | None = None
+        self.briefing_scheduler: object | None = None
         self.stopped = False
+        self.request_count = 0
 
     def schedule(self) -> bool:
         return True
@@ -68,18 +72,46 @@ class FakeShutdownController:
     def attach_runtime(self, runtime: object) -> None:
         self.runtime = runtime
 
+    def attach_briefing_scheduler(self, scheduler: object) -> None:
+        self.briefing_scheduler = scheduler
+
+    def request_shutdown(self, reason: str) -> bool:
+        del reason
+        self.request_count += 1
+        self.handle_application_quit()
+        return True
+
     def handle_application_quit(self) -> None:
         if self.stopped:
             return
         self.stopped = True
+        if self.briefing_scheduler is not None:
+            self.briefing_scheduler.stop()  # type: ignore[attr-defined]
         if self.runtime is not None:
             self.runtime.stop()  # type: ignore[attr-defined]
         self.process_lock.unlock()  # type: ignore[attr-defined]
 
 
+class FakeBriefingScheduler:
+    def schedule(self, now: datetime) -> tuple[object, ...]:
+        del now
+        return ()
+
+    def stop(self) -> None:
+        return None
+
+
 def run(*args: object, **kwargs: object) -> int:
     """Run entry-point tests with a deterministic non-Qt shutdown controller."""
     kwargs.setdefault("shutdown_controller_factory", FakeShutdownController)
+    kwargs.setdefault(
+        "market_day_checker",
+        lambda target_date: TradingDayResult(
+            target_date, MarketStatus.OPEN, "weekday"
+        ),
+    )
+    kwargs.setdefault("briefing_scheduler_factory", FakeBriefingScheduler)
+    kwargs.setdefault("clock", lambda: datetime(2026, 7, 20, 9, 0))
     return application_run(*args, **kwargs)  # type: ignore[arg-type]
 
 
@@ -162,6 +194,47 @@ class FakeConnection:
 
 
 class MainEntryPointTests(unittest.TestCase):
+    def test_unknown_calendar_warns_and_continues_runtime_startup(self) -> None:
+        events: list[str] = []
+        application = FakeApplication(events)
+        runtime = FakeRuntime(events)
+        process_lock = FakeProcessLock()
+        controllers: list[FakeShutdownController] = []
+
+        def make_shutdown_controller(
+            app: object, lock: object
+        ) -> FakeShutdownController:
+            controller = FakeShutdownController(app, lock)
+            controllers.append(controller)
+            return controller
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exit_code = run(
+                [],
+                application_factory=lambda arguments: application,
+                adapter_factory=FakeAdapter,  # type: ignore[arg-type]
+                manager_factory=lambda adapter: FakeManager(),  # type: ignore[arg-type]
+                runtime_factory=lambda *args, **kwargs: runtime,
+                lock_factory=lambda: process_lock,
+                shutdown_controller_factory=make_shutdown_controller,
+                market_day_checker=lambda target_date: TradingDayResult(
+                    target_date,
+                    MarketStatus.UNKNOWN,
+                    "unknown_calendar",
+                    "KRX calendar data is incomplete for 2026",
+                ),
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(runtime.start_count, 1)
+        self.assertIn("exec", events)
+        self.assertEqual(controllers[0].request_count, 0)
+        self.assertIn(
+            "market calendar incomplete; continuing in warning mode",
+            output.getvalue(),
+        )
+
     def test_run_logs_process_pid(self) -> None:
         events: list[str] = []
         output = io.StringIO()

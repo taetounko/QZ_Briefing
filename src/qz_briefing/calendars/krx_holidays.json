@@ -1,0 +1,11 @@
+{
+  "market": "KRX",
+  "years": {
+    "2026": {
+      "complete": false,
+      "holidays": [],
+      "source": "KRX holiday rules verified; complete 2026 closure list not yet verified",
+      "source_url": "https://global.krx.co.kr/contents/GLB/06/0602/0602020204/GLB0602020204T1.jsp"
+    }
+  }
+}

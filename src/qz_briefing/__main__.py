@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable, Sequence
+from datetime import date, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -15,6 +16,12 @@ from qz_briefing.kiwoom import (
 )
 from qz_briefing.runtime import QtConnectionRuntime
 from qz_briefing.runtime.automatic_shutdown import GracefulShutdownController
+from qz_briefing.scheduling import (
+    BriefingScheduler,
+    MarketStatus,
+    TradingDayResult,
+    load_market_calendar,
+)
 
 
 class SignalLike(Protocol):
@@ -45,6 +52,14 @@ LockFactory = Callable[[], ProcessLockLike]
 ShutdownControllerFactory = Callable[
     [ApplicationLike, ProcessLockLike], GracefulShutdownController
 ]
+MarketDayChecker = Callable[[date], TradingDayResult]
+BriefingSchedulerFactory = Callable[[], BriefingScheduler]
+LocalClock = Callable[[], datetime]
+
+
+def check_market_day(target_date: date) -> TradingDayResult:
+    """Evaluate the maintained offline KRX calendar."""
+    return load_market_calendar().evaluate(target_date)
 
 
 def create_single_instance_lock() -> ProcessLockLike:
@@ -147,6 +162,9 @@ def run(
     runtime_factory: RuntimeFactory = QtConnectionRuntime,
     lock_factory: LockFactory = create_single_instance_lock,
     shutdown_controller_factory: ShutdownControllerFactory = GracefulShutdownController,
+    market_day_checker: MarketDayChecker = check_market_day,
+    briefing_scheduler_factory: BriefingSchedulerFactory = BriefingScheduler,
+    clock: LocalClock = datetime.now,
 ) -> int:
     """Assemble the connection runtime and keep the Qt event loop running."""
     process_lock = lock_factory()
@@ -157,6 +175,7 @@ def run(
     shutdown_controller: GracefulShutdownController | None = None
     adapter: KiwoomQAxAdapter | None = None
     runtime: QtConnectionRuntime | None = None
+    briefing_scheduler: BriefingScheduler | None = None
     try:
         application = application_factory(sys.argv if arguments is None else arguments)
         print(f"PROCESS PID: {os.getpid()}", flush=True)
@@ -165,6 +184,33 @@ def run(
         application.aboutToQuit.connect(shutdown_controller.handle_application_quit)
         if not shutdown_controller.schedule():
             return 0
+
+        now = clock()
+        trading_day = market_day_checker(now.date())
+        print(
+            "TRADING DAY "
+            f"date={trading_day.date.isoformat()} "
+            f"status={trading_day.status.value} "
+            f"reason={trading_day.reason}",
+            flush=True,
+        )
+        if trading_day.warning is not None:
+            print(f"TRADING CALENDAR WARNING: {trading_day.warning}", flush=True)
+        if trading_day.status is MarketStatus.UNKNOWN:
+            print(
+                "market calendar incomplete; continuing in warning mode",
+                flush=True,
+            )
+        if trading_day.status is MarketStatus.CLOSED:
+            shutdown_controller.request_shutdown(
+                "non-trading day shutdown requested: "
+                f"date={trading_day.date.isoformat()} reason={trading_day.reason}"
+            )
+            return 0
+
+        briefing_scheduler = briefing_scheduler_factory()
+        shutdown_controller.attach_briefing_scheduler(briefing_scheduler)
+        briefing_scheduler.schedule(now)
 
         adapter = adapter_factory()
         print("KIWOOM OCX READY", flush=True)
