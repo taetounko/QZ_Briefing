@@ -24,6 +24,7 @@ from qz_briefing.__main__ import (  # noqa: E402
 )
 from qz_briefing.kiwoom import (  # noqa: E402
     ConnectionConfig,
+    ConnectionState,
     KiwoomConnectionManager,
 )
 from qz_briefing.scheduling import MarketStatus, TradingDayResult  # noqa: E402
@@ -62,7 +63,7 @@ class FakeShutdownController:
         del application
         self.process_lock = process_lock
         self.runtime: object | None = None
-        self.briefing_scheduler: object | None = None
+        self.briefing_schedulers: list[object] = []
         self.stopped = False
         self.request_count = 0
 
@@ -77,7 +78,7 @@ class FakeShutdownController:
         self.runtime = runtime
 
     def attach_briefing_scheduler(self, scheduler: object) -> None:
-        self.briefing_scheduler = scheduler
+        self.briefing_schedulers.append(scheduler)
 
     def request_shutdown(self, reason: str) -> bool:
         del reason
@@ -89,8 +90,8 @@ class FakeShutdownController:
         if self.stopped:
             return
         self.stopped = True
-        if self.briefing_scheduler is not None:
-            self.briefing_scheduler.stop()  # type: ignore[attr-defined]
+        for briefing_scheduler in self.briefing_schedulers:
+            briefing_scheduler.stop()  # type: ignore[attr-defined]
         if self.runtime is not None:
             self.runtime.stop()  # type: ignore[attr-defined]
         self.process_lock.unlock()  # type: ignore[attr-defined]
@@ -148,6 +149,7 @@ class FakeAdapter:
 class FakeManager:
     def __init__(self) -> None:
         self.transitions: tuple[object, ...] = ()
+        self.state = ConnectionState.CONNECTED
 
 
 class FakeRuntime:
@@ -230,7 +232,7 @@ class MainEntryPointTests(unittest.TestCase):
             runtime_factory=lambda *args, **kwargs: FakeRuntime(events),
             lock_factory=FakeProcessLock,
             briefing_scheduler_factory=ImmediateBriefingScheduler,
-            briefing_pipeline_factory=lambda clock: pipeline,
+            briefing_pipeline_factory=lambda clock, adapter: pipeline,
         )
 
         self.assertEqual(exit_code, 0)
@@ -255,7 +257,7 @@ class MainEntryPointTests(unittest.TestCase):
             runtime_factory=lambda *args, **kwargs: FakeRuntime(events),
             lock_factory=FakeProcessLock,
             briefing_scheduler_factory=make_scheduler,
-            briefing_pipeline_factory=lambda clock: pipeline,
+            briefing_pipeline_factory=lambda clock, adapter: pipeline,
         )
 
         schedulers[0].callbacks["pre_market"]()  # type: ignore[index]
@@ -553,6 +555,22 @@ class MainEntryPointTests(unittest.TestCase):
         self.assertIn("COMMCONNECT CALL COUNT: 1", output.getvalue())
         self.assertIn("ONEVENTCONNECT ERROR CODE: 0", output.getvalue())
         self.assertIn("GETCONNECTSTATE RESULT: 1", output.getvalue())
+
+    def test_reporter_forwards_connection_state_after_console_reporting(self) -> None:
+        connection = FakeConnection(1)
+        manager = KiwoomConnectionManager(connection)
+        manager.start()
+        observed: list[ConnectionState] = []
+        runtime = type("Runtime", (), {"connection_state": manager.state})()
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            ConsoleConnectionReporter(
+                manager, on_connection_state=observed.append
+            )(runtime)  # type: ignore[arg-type]
+
+        self.assertIn("CONNECTION_STATE DISCONNECTED -> CONNECTED", output.getvalue())
+        self.assertEqual(observed, [ConnectionState.CONNECTED])
 
 
 if __name__ == "__main__":

@@ -38,6 +38,10 @@ class KiwoomAdapterClosedError(KiwoomAdapterError):
     """Raised when an operation is requested after adapter cleanup."""
 
 
+class KiwoomMasterDataError(KiwoomAdapterError):
+    """Raised when a read-only master-data value is unavailable."""
+
+
 class SignalLike(Protocol):
     def connect(self, callback: LoginEventListener) -> None: ...
 
@@ -51,7 +55,7 @@ class QAxWidgetLike(Protocol):
 
     def isNull(self) -> bool: ...
 
-    def dynamicCall(self, signature: str) -> object: ...
+    def dynamicCall(self, signature: str, *arguments: object) -> object: ...
 
     def close(self) -> object: ...
 
@@ -182,6 +186,14 @@ class KiwoomQAxAdapter:
                 "CommConnect did not return an integer"
             ) from exc
 
+    def get_master_code_name(self, code: str) -> str:
+        """Return the listed security name using a read-only master query."""
+        return self._get_required_master_text("GetMasterCodeName(QString)", code)
+
+    def get_master_last_price(self, code: str) -> str:
+        """Return the raw reference/previous-close price master value."""
+        return self._get_required_master_text("GetMasterLastPrice(QString)", code)
+
     def add_login_event_listener(self, callback: LoginEventListener) -> None:
         """Register a callback once without storing authentication data."""
         self._ensure_open()
@@ -226,6 +238,25 @@ class KiwoomQAxAdapter:
     def _ensure_open(self) -> None:
         if self._closed:
             raise KiwoomAdapterClosedError("Kiwoom QAx adapter is closed")
+
+    def _get_required_master_text(self, signature: str, code: str) -> str:
+        self._ensure_open()
+        normalized_code = str(code).strip()
+        if not normalized_code:
+            raise KiwoomMasterDataError("Security code must not be empty")
+        try:
+            raw_value = self._widget.dynamicCall(signature, normalized_code)
+        except Exception as exc:
+            raise KiwoomMasterDataError(
+                f"{signature.split('(')[0]} failed for {normalized_code}"
+            ) from exc
+        value = str(raw_value).strip()
+        if not value:
+            raise KiwoomMasterDataError(
+                f"{signature.split('(')[0]} returned an empty value for "
+                f"{normalized_code}"
+            )
+        return value
 
     def _dispose_widget(self) -> None:
         try:

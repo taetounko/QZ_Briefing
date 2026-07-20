@@ -93,7 +93,7 @@ class GracefulShutdownController:
         self._clock = clock
         self._flush_logs = flush_logs
         self._runtime: RuntimeLike | None = None
-        self._briefing_scheduler: RuntimeLike | None = None
+        self._briefing_resources: list[RuntimeLike] = []
         self._shutdown_started = False
         self._shutdown_completed = False
         self._lock_released = False
@@ -114,7 +114,8 @@ class GracefulShutdownController:
 
     def attach_briefing_scheduler(self, scheduler: RuntimeLike) -> None:
         """Attach briefing timers so no new work starts during shutdown."""
-        self._briefing_scheduler = scheduler
+        if scheduler not in self._briefing_resources:
+            self._briefing_resources.append(scheduler)
 
     def schedule(self) -> bool:
         """Schedule 20:00 shutdown; return False when shutdown is already due."""
@@ -137,8 +138,8 @@ class GracefulShutdownController:
         self._shutdown_started = True
         print(reason, flush=True)
         try:
-            if self._briefing_scheduler is not None:
-                self._briefing_scheduler.stop()
+            for briefing_resource in self._briefing_resources:
+                briefing_resource.stop()
             # Stop the automatic trigger, then runtime work/reconnect timers.
             self._timer.stop()
             if self._runtime is not None:

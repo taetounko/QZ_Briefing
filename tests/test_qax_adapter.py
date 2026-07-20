@@ -63,6 +63,8 @@ class FakeQAxWidget:
         self.request_result = request_result
         self.set_control_calls: list[str] = []
         self.dynamic_call_calls: list[str] = []
+        self.master_names = {"005930": "삼성전자"}
+        self.master_prices = {"005930": "+72,500"}
         self.close_count = 0
         self.delete_later_count = 0
 
@@ -73,12 +75,16 @@ class FakeQAxWidget:
     def isNull(self) -> bool:
         return self.is_null
 
-    def dynamicCall(self, signature: str) -> object:
+    def dynamicCall(self, signature: str, *arguments: object) -> object:
         self.dynamic_call_calls.append(signature)
         if signature == "GetConnectState()":
             return self.connect_state
         if signature == "CommConnect()":
             return self.request_result
+        if signature == "GetMasterCodeName(QString)":
+            return self.master_names[str(arguments[0])]
+        if signature == "GetMasterLastPrice(QString)":
+            return self.master_prices[str(arguments[0])]
         raise AssertionError(f"Unexpected dynamicCall signature: {signature}")
 
     def close(self) -> None:
@@ -89,6 +95,16 @@ class FakeQAxWidget:
 
 
 class KiwoomQAxAdapterTests(unittest.TestCase):
+    def test_read_only_master_data_wrappers_use_explicit_signatures(self) -> None:
+        widget = FakeQAxWidget()
+        adapter = KiwoomQAxAdapter(widget=widget)
+        self.assertEqual(adapter.get_master_code_name("005930"), "삼성전자")
+        self.assertEqual(adapter.get_master_last_price("005930"), "+72,500")
+        self.assertEqual(
+            widget.dynamic_call_calls,
+            ["GetMasterCodeName(QString)", "GetMasterLastPrice(QString)"],
+        )
+
     def test_default_factory_widget_is_not_rebound(self) -> None:
         widget = FakeQAxWidget()
         with patch.object(qax_adapter_module, "_create_qax_widget", return_value=widget):

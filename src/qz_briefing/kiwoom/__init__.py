@@ -15,6 +15,7 @@ from .qax_adapter import (
     KiwoomConnectionStateError,
     KiwoomControlBindingError,
     KiwoomLoginEventError,
+    KiwoomMasterDataError,
     KiwoomQAxAdapter,
 )
 
@@ -31,5 +32,6 @@ __all__ = [
     "KiwoomConnectionStateError",
     "KiwoomControlBindingError",
     "KiwoomLoginEventError",
+    "KiwoomMasterDataError",
     "KiwoomQAxAdapter",
 ]
