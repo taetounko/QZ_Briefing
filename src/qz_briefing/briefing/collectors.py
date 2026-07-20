@@ -79,6 +79,26 @@ MARKET_INDEX_FIELDS = (
 MARKET_INDEX_TARGETS = (
     ("KOSPI", "0", "001", "코스피"),
     ("KOSDAQ", "1", "101", "코스닥"),
+    ("KOSPI200", "2", "201", "코스피200"),
+)
+
+INVESTOR_FLOW_FIELDS = (
+    "업종코드",
+    "업종명",
+    "개인순매수",
+    "외국인순매수",
+    "기관계순매수",
+)
+
+INVESTOR_FLOW_TARGETS = (
+    ("KOSPI", "0", "001"),
+    ("KOSDAQ", "1", "101"),
+)
+
+INVESTOR_FIELDS = (
+    ("individual", "개인", "개인순매수"),
+    ("foreigner", "외국인", "외국인순매수"),
+    ("institution", "기관계", "기관계순매수"),
 )
 
 
@@ -118,6 +138,37 @@ class KiwoomMarketIndexDataSource:
                 tr_code="OPT20001",
                 inputs={"시장구분": market_code, "업종코드": industry_code},
                 output_fields=MARKET_INDEX_FIELDS,
+            )
+        )
+
+
+class InvestorFlowDataSource(Protocol):
+    def get_market_investor_flows(
+        self, market_code: str, trading_date: str
+    ) -> list[dict[str, str]]: ...
+
+
+class KiwoomInvestorFlowDataSource:
+    """Issue the locally documented OPT10051 read-only repeated request."""
+
+    def __init__(self, tr_queue: KiwoomTrRequestQueue) -> None:
+        self._tr_queue = tr_queue
+
+    def get_market_investor_flows(
+        self, market_code: str, trading_date: str
+    ) -> list[dict[str, str]]:
+        return self._tr_queue.request_rows(
+            TrRequest(
+                request_name=f"qz_investor_flows_{market_code}",
+                tr_code="OPT10051",
+                inputs={
+                    "시장구분": market_code,
+                    "금액수량구분": "0",
+                    "기준일자": trading_date.replace("-", ""),
+                    "거래소구분": "",
+                },
+                output_fields=INVESTOR_FLOW_FIELDS,
+                repeat=True,
             )
         )
 
@@ -301,6 +352,89 @@ class KiwoomMarketIndexCollector:
             "collector": self.name,
             "collected_at": collected_at,
             "indices": indices,
+            "warnings": warnings,
+            "errors": errors,
+        }
+
+
+class KiwoomInvestorFlowCollector:
+    """Collect KOSPI/KOSDAQ investor net amounts with market isolation."""
+
+    name = "kiwoom_investor_flows"
+
+    def __init__(
+        self,
+        data_source: InvestorFlowDataSource,
+        clock: Callable[[], datetime] = datetime.now,
+    ) -> None:
+        self._data_source = data_source
+        self._clock = clock
+
+    def collect(self, context: BriefingContext) -> dict[str, object]:
+        collected_at = self._clock().isoformat()
+        markets: list[dict[str, object]] = []
+        warnings: list[str] = []
+        errors: list[str] = []
+        for market, market_code, industry_code in INVESTOR_FLOW_TARGETS:
+            market_result: dict[str, object] = {
+                "market": market,
+                "industry_code": industry_code,
+                "collected_at": collected_at,
+                "investors": [],
+                "raw": {},
+                "warnings": [],
+            }
+            market_warnings: list[str] = market_result["warnings"]  # type: ignore[assignment]
+            try:
+                rows = self._data_source.get_market_investor_flows(
+                    market_code, context.trading_date.isoformat()
+                )
+                row = next(
+                    (item for item in rows if item.get("업종코드", "").strip() == industry_code),
+                    None,
+                )
+                if row is None:
+                    raise ValueError(f"official aggregate row {industry_code} is missing")
+                market_result["raw"] = dict(row)
+                investors: list[dict[str, object]] = []
+                for investor_code, investor_name, field in INVESTOR_FIELDS:
+                    investor_warnings = [
+                        "OPT10051 does not provide separate sell or buy amounts"
+                    ]
+                    try:
+                        net_buy = normalize_integer(row.get(field, ""))
+                    except (TypeError, ValueError) as exc:
+                        net_buy = None
+                        investor_warnings.append(
+                            f"invalid {field}: {type(exc).__name__}: {exc}"
+                        )
+                    investors.append(
+                        {
+                            "investor": investor_code,
+                            "investor_name": investor_name,
+                            "sell": None,
+                            "buy": None,
+                            "net_buy": net_buy,
+                            "unit": "amount (official scale unspecified)",
+                            "raw": {field: row.get(field, "")},
+                            "warnings": investor_warnings,
+                        }
+                    )
+                market_result["investors"] = investors
+                market_warnings.append(
+                    "OPT10051 local documentation does not specify the amount scale"
+                )
+                warnings.extend(market_warnings)
+            except Exception as exc:
+                error = f"{market} investor flow failed: {type(exc).__name__}: {exc}"
+                market_warnings.append(error)
+                warnings.append(error)
+                errors.append(error)
+            markets.append(market_result)
+        return {
+            "collector": self.name,
+            "collected_at": collected_at,
+            "markets": markets,
             "warnings": warnings,
             "errors": errors,
         }

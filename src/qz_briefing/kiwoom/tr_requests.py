@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, TypeAlias
 
 
 class KiwoomTrError(RuntimeError):
@@ -54,6 +54,8 @@ class TrAdapter(Protocol):
         self, tr_code: str, request_name: str, index: int, item_name: str
     ) -> str: ...
 
+    def get_repeat_count(self, tr_code: str, request_name: str) -> int: ...
+
 
 def create_timer() -> TimerLike:
     from PyQt5.QtCore import QTimer
@@ -74,12 +76,16 @@ class TrRequest:
     inputs: Mapping[str, str]
     output_fields: tuple[str, ...]
     timeout_ms: int = 10_000
+    repeat: bool = False
+
+
+TrResult: TypeAlias = dict[str, str] | list[dict[str, str]]
 
 
 @dataclass
 class _QueuedRequest:
     request: TrRequest
-    on_success: Callable[[dict[str, str]], None]
+    on_success: Callable[[TrResult], None]
     on_error: Callable[[Exception], None]
     screen_no: str | None = None
     timer: TimerLike | None = None
@@ -134,7 +140,7 @@ class KiwoomTrRequestQueue:
     def submit(
         self,
         request: TrRequest,
-        on_success: Callable[[dict[str, str]], None],
+        on_success: Callable[[TrResult], None],
         on_error: Callable[[Exception], None],
     ) -> None:
         if self._closed:
@@ -145,10 +151,10 @@ class KiwoomTrRequestQueue:
     def request(self, request: TrRequest) -> dict[str, str]:
         """Wait in a bounded nested Qt loop while the outer UI keeps processing."""
         event_loop = self._event_loop_factory()
-        result: list[dict[str, str]] = []
+        result: list[TrResult] = []
         errors: list[Exception] = []
 
-        def succeed(data: dict[str, str]) -> None:
+        def succeed(data: TrResult) -> None:
             result.append(data)
             event_loop.quit()
 
@@ -163,6 +169,34 @@ class KiwoomTrRequestQueue:
             raise errors[0]
         if not result:
             raise KiwoomTrError("TR request ended without a result")
+        value = result[0]
+        if not isinstance(value, dict):
+            raise KiwoomTrError("Single-row TR request returned repeated data")
+        return value
+
+    def request_rows(self, request: TrRequest) -> list[dict[str, str]]:
+        """Return every repeated output row without changing single-row callers."""
+        if not request.repeat:
+            raise ValueError("Repeated TR request must set repeat=True")
+        event_loop = self._event_loop_factory()
+        result: list[TrResult] = []
+        errors: list[Exception] = []
+
+        def succeed(data: TrResult) -> None:
+            result.append(data)
+            event_loop.quit()
+
+        def fail(error: Exception) -> None:
+            errors.append(error)
+            event_loop.quit()
+
+        self.submit(request, succeed, fail)
+        if not result and not errors:
+            event_loop.exec_()
+        if errors:
+            raise errors[0]
+        if not result or not isinstance(result[0], list):
+            raise KiwoomTrError("Repeated TR request ended without row data")
         return result[0]
 
     def close(self) -> None:
@@ -223,12 +257,26 @@ class KiwoomTrRequestQueue:
         ):
             return
         try:
-            data = {
-                field: self._adapter.get_comm_data(
-                    request.tr_code, request.request_name, 0, field
+            if request.repeat:
+                row_count = self._adapter.get_repeat_count(
+                    request.tr_code, request.request_name
                 )
-                for field in request.output_fields
-            }
+                data: TrResult = [
+                    {
+                        field: self._adapter.get_comm_data(
+                            request.tr_code, request.request_name, index, field
+                        )
+                        for field in request.output_fields
+                    }
+                    for index in range(row_count)
+                ]
+            else:
+                data = {
+                    field: self._adapter.get_comm_data(
+                        request.tr_code, request.request_name, 0, field
+                    )
+                    for field in request.output_fields
+                }
         except Exception as exc:
             self._finish_error(exc)
             return
@@ -244,7 +292,7 @@ class KiwoomTrRequestQueue:
             )
         )
 
-    def _finish_success(self, data: dict[str, str]) -> None:
+    def _finish_success(self, data: TrResult) -> None:
         active = self._take_active()
         if active is None:
             return

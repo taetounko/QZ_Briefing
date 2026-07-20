@@ -45,6 +45,7 @@ class FakeTrAdapter:
         self.inputs: list[tuple[str, str]] = []
         self.requests: list[tuple[str, str, int, str]] = []
         self.values: dict[tuple[str, str, int, str], str] = {}
+        self.repeat_count = 0
 
     def add_tr_data_listener(self, callback: object) -> None:
         self.listener = callback
@@ -62,6 +63,9 @@ class FakeTrAdapter:
         self, tr_code: str, request_name: str, index: int, item_name: str
     ) -> str:
         return self.values[(tr_code, request_name, index, item_name)]
+
+    def get_repeat_count(self, tr_code: str, request_name: str) -> int:
+        return self.repeat_count
 
     def respond(self, request_index: int = -1) -> None:
         request_name, tr_code, _, screen_no = self.requests[request_index]
@@ -184,3 +188,30 @@ def test_closed_queue_rejects_new_requests() -> None:
     queue.close()
     with pytest.raises(KiwoomTrClosedError):
         queue.submit(request(), lambda data: None, lambda error: None)
+
+
+def test_repeated_response_parses_every_official_output_row() -> None:
+    queue, adapter, _ = make_queue()
+    repeated = TrRequest(
+        request_name="flows",
+        tr_code="OPT10051",
+        inputs={"시장구분": "0"},
+        output_fields=("업종코드", "개인순매수"),
+        repeat=True,
+    )
+    adapter.repeat_count = 2
+    adapter.values = {
+        ("OPT10051", "flows", 0, "업종코드"): "001",
+        ("OPT10051", "flows", 0, "개인순매수"): "-1,000",
+        ("OPT10051", "flows", 1, "업종코드"): "002",
+        ("OPT10051", "flows", 1, "개인순매수"): "2,000",
+    }
+    results: list[object] = []
+    queue.submit(repeated, results.append, lambda error: None)
+    adapter.respond()
+    assert results == [
+        [
+            {"업종코드": "001", "개인순매수": "-1,000"},
+            {"업종코드": "002", "개인순매수": "2,000"},
+        ]
+    ]

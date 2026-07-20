@@ -16,6 +16,8 @@ from qz_briefing.briefing import (
     KiwoomCoreMarketCollector,
     KiwoomMarketIndexCollector,
     KiwoomMarketIndexDataSource,
+    KiwoomInvestorFlowCollector,
+    KiwoomInvestorFlowDataSource,
     KiwoomStockBasicDataSource,
 )
 from qz_briefing.kiwoom import (
@@ -95,6 +97,9 @@ def create_briefing_pipeline(
             ),
             KiwoomMarketIndexCollector(
                 KiwoomMarketIndexDataSource(tr_queue), clock=clock
+            ),
+            KiwoomInvestorFlowCollector(
+                KiwoomInvestorFlowDataSource(tr_queue), clock=clock
             ),
         ],
         clock=clock,

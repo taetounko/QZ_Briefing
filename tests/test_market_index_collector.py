@@ -80,12 +80,15 @@ def test_opt20001_uses_official_inputs_for_kospi_and_kosdaq_in_order() -> None:
     source = KiwoomMarketIndexDataSource(queue)  # type: ignore[arg-type]
     source.get_market_index("0", "001")
     source.get_market_index("1", "101")
-    first, second = queue.requests
-    assert first.tr_code == second.tr_code == "OPT20001"  # type: ignore[attr-defined]
+    source.get_market_index("2", "201")
+    first, second, third = queue.requests
+    assert first.tr_code == second.tr_code == third.tr_code == "OPT20001"  # type: ignore[attr-defined]
     assert first.inputs == {"시장구분": "0", "업종코드": "001"}  # type: ignore[attr-defined]
     assert second.inputs == {"시장구분": "1", "업종코드": "101"}  # type: ignore[attr-defined]
+    assert third.inputs == {"시장구분": "2", "업종코드": "201"}  # type: ignore[attr-defined]
     assert first.request_name == "qz_market_index_001"  # type: ignore[attr-defined]
     assert second.request_name == "qz_market_index_101"  # type: ignore[attr-defined]
+    assert third.request_name == "qz_market_index_201"  # type: ignore[attr-defined]
     assert first.output_fields == (  # type: ignore[attr-defined]
         "현재가",
         "전일대비",
@@ -103,7 +106,7 @@ def test_index_values_preserve_decimals_signs_and_integer_totals() -> None:
         FakeMarketIndexDataSource(), clock=lambda: NOW
     )
     result = collector.collect(context())
-    kospi, kosdaq = result["indices"]
+    kospi, kosdaq, kospi200 = result["indices"]
     assert kospi["current"] == 6516.27
     assert kospi["open"] == 6643.58
     assert kospi["change"] == -304.33
@@ -115,17 +118,19 @@ def test_index_values_preserve_decimals_signs_and_integer_totals() -> None:
     assert kospi["volume"] == 1_234_567
     assert kospi["trading_value"] == 12_345_678
     assert kosdaq["open"] is None
+    assert kospi200["name"] == "코스피200"
 
 
 def test_kospi_failure_does_not_stop_kosdaq() -> None:
     source = FakeMarketIndexDataSource(fail_market_code="0")
     result = KiwoomMarketIndexCollector(source, clock=lambda: NOW).collect(context())
-    kospi, kosdaq = result["indices"]
-    assert source.calls == [("0", "001"), ("1", "101")]
+    kospi, kosdaq, kospi200 = result["indices"]
+    assert source.calls == [("0", "001"), ("1", "101"), ("2", "201")]
     assert kospi["current"] is None
     assert kospi["warnings"]
     assert kosdaq["name"] == "코스닥"
     assert kosdaq["current"] == 850.25
+    assert kospi200["name"] == "코스피200"
     assert result["errors"]
 
 
@@ -163,7 +168,7 @@ def test_korean_market_names_and_fields_are_saved_in_json(tmp_path: Path) -> Non
     text = Path(result.json_path or "").read_text(encoding="utf-8")
     saved = json.loads(text)
     indices = saved["collectors"]["kiwoom_market_indices"]["data"]["indices"]
-    assert [item["name"] for item in indices] == ["코스피", "코스닥"]
+    assert [item["name"] for item in indices] == ["코스피", "코스닥", "코스피200"]
     assert "등락률" in indices[0]["raw"]
     assert "코스피" in text and "코스닥" in text
 
@@ -175,10 +180,13 @@ def test_default_pipeline_registers_collectors_in_order_with_same_queue() -> Non
     assert [collector.name for collector in collectors] == [
         "kiwoom_core_market",
         "kiwoom_market_indices",
+        "kiwoom_investor_flows",
     ]
     core_source = collectors[0]._data_source  # type: ignore[attr-defined]
     index_source = collectors[1]._data_source  # type: ignore[attr-defined]
+    flow_source = collectors[2]._data_source  # type: ignore[attr-defined]
     assert isinstance(core_source, KiwoomStockBasicDataSource)
     assert isinstance(index_source, KiwoomMarketIndexDataSource)
     assert core_source._tr_queue is queue  # type: ignore[attr-defined]
     assert index_source._tr_queue is queue  # type: ignore[attr-defined]
+    assert flow_source._tr_queue is queue  # type: ignore[attr-defined]

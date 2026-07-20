@@ -239,6 +239,14 @@ class KiwoomQAxAdapter:
         )
         return str(value).strip()
 
+    def get_repeat_count(self, tr_code: str, request_name: str) -> int:
+        """Return the official repeated-output row count for a TR response."""
+        self._ensure_open()
+        value = self._widget.dynamicCall(
+            "GetRepeatCnt(QString, QString)", tr_code, request_name
+        )
+        return int(value)
+
     def add_tr_data_listener(self, callback: TrDataListener) -> None:
         self._ensure_open()
         if callback not in self._tr_data_listeners:
