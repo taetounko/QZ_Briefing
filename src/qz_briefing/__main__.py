@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import sys
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Protocol
 
 from qz_briefing.kiwoom import (
@@ -25,10 +26,42 @@ class ApplicationLike(Protocol):
     def exec_(self) -> int: ...
 
 
+class ProcessLockLike(Protocol):
+    def tryLock(self, timeout: int = 0) -> bool: ...
+
+    def removeStaleLockFile(self) -> bool: ...
+
+    def unlock(self) -> None: ...
+
+
 ApplicationFactory = Callable[[Sequence[str]], ApplicationLike]
 AdapterFactory = Callable[[], KiwoomQAxAdapter]
 ManagerFactory = Callable[[KiwoomQAxAdapter], KiwoomConnectionManager]
 RuntimeFactory = Callable[..., QtConnectionRuntime]
+LockFactory = Callable[[], ProcessLockLike]
+
+
+def create_single_instance_lock() -> ProcessLockLike:
+    """Create a per-user lock in Local AppData without creating QApplication."""
+    from PyQt5.QtCore import QLockFile
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        raise RuntimeError("LOCALAPPDATA is not available")
+    lock_directory = Path(local_app_data) / "QZ_Briefing"
+    lock_directory.mkdir(parents=True, exist_ok=True)
+    lock = QLockFile(str(lock_directory / "qz_briefing.lock"))
+    lock.setStaleLockTime(30_000)
+    return lock
+
+
+def acquire_process_lock(lock: ProcessLockLike) -> bool:
+    """Acquire once, recovering only a lock QLockFile confirms is stale."""
+    if lock.tryLock(0):
+        return True
+    if not lock.removeStaleLockFile():
+        return False
+    return bool(lock.tryLock(0))
 
 
 def create_application(arguments: Sequence[str]) -> ApplicationLike:
@@ -106,29 +139,38 @@ def run(
     adapter_factory: AdapterFactory = KiwoomQAxAdapter,
     manager_factory: ManagerFactory = KiwoomConnectionManager,
     runtime_factory: RuntimeFactory = QtConnectionRuntime,
+    lock_factory: LockFactory = create_single_instance_lock,
 ) -> int:
     """Assemble the connection runtime and keep the Qt event loop running."""
-    application = application_factory(sys.argv if arguments is None else arguments)
-    print(f"PROCESS PID: {os.getpid()}", flush=True)
-    print("QAPPLICATION READY", flush=True)
-    adapter = adapter_factory()
-    print("KIWOOM OCX READY", flush=True)
-    runtime: QtConnectionRuntime | None = None
+    process_lock = lock_factory()
+    if not acquire_process_lock(process_lock):
+        print("QZ BRIEFING ALREADY RUNNING", flush=True)
+        return 2
+
     try:
-        manager = manager_factory(adapter)
-        reporter = ConsoleConnectionReporter(manager, adapter)
-        runtime = runtime_factory(adapter, manager, on_state_change=reporter)
-        application.aboutToQuit.connect(runtime.stop)
-        if not runtime.start():
-            raise RuntimeError("Kiwoom connection runtime did not start")
-        print("RUNTIME STARTED", flush=True)
-        return int(application.exec_())
+        application = application_factory(sys.argv if arguments is None else arguments)
+        print(f"PROCESS PID: {os.getpid()}", flush=True)
+        print("QAPPLICATION READY", flush=True)
+        adapter = adapter_factory()
+        print("KIWOOM OCX READY", flush=True)
+        runtime: QtConnectionRuntime | None = None
+        try:
+            manager = manager_factory(adapter)
+            reporter = ConsoleConnectionReporter(manager, adapter)
+            runtime = runtime_factory(adapter, manager, on_state_change=reporter)
+            application.aboutToQuit.connect(runtime.stop)
+            if not runtime.start():
+                raise RuntimeError("Kiwoom connection runtime did not start")
+            print("RUNTIME STARTED", flush=True)
+            return int(application.exec_())
+        finally:
+            if runtime is None:
+                adapter.close()
+            else:
+                runtime.stop()
+            print("RUNTIME STOPPED", flush=True)
     finally:
-        if runtime is None:
-            adapter.close()
-        else:
-            runtime.stop()
-        print("RUNTIME STOPPED", flush=True)
+        process_lock.unlock()
 
 
 def main() -> int:

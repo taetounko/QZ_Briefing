@@ -15,7 +15,12 @@ SRC_ROOT = PROJECT_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from qz_briefing.__main__ import ConsoleConnectionReporter, main, run  # noqa: E402
+from qz_briefing.__main__ import (  # noqa: E402
+    ConsoleConnectionReporter,
+    acquire_process_lock,
+    main,
+    run,
+)
 from qz_briefing.kiwoom import (  # noqa: E402
     ConnectionConfig,
     KiwoomConnectionManager,
@@ -87,6 +92,30 @@ class FakeRuntime:
         self.events.append("stop")
 
 
+class FakeProcessLock:
+    def __init__(
+        self,
+        try_results: list[bool] | None = None,
+        stale_result: bool = False,
+    ) -> None:
+        self.try_results = list(try_results or [True])
+        self.stale_result = stale_result
+        self.try_calls: list[int] = []
+        self.remove_stale_count = 0
+        self.unlock_count = 0
+
+    def tryLock(self, timeout: int = 0) -> bool:
+        self.try_calls.append(timeout)
+        return self.try_results.pop(0)
+
+    def removeStaleLockFile(self) -> bool:
+        self.remove_stale_count += 1
+        return self.stale_result
+
+    def unlock(self) -> None:
+        self.unlock_count += 1
+
+
 class FakeConnection:
     def __init__(self, connect_state: int) -> None:
         self.connect_state = connect_state
@@ -114,6 +143,7 @@ class MainEntryPointTests(unittest.TestCase):
                 adapter_factory=FakeAdapter,  # type: ignore[arg-type]
                 manager_factory=lambda adapter: FakeManager(),  # type: ignore[arg-type]
                 runtime_factory=lambda *args, **kwargs: FakeRuntime(events),
+                lock_factory=FakeProcessLock,
             )
         self.assertIn("PROCESS PID: 12345", output.getvalue())
 
@@ -144,6 +174,7 @@ class MainEntryPointTests(unittest.TestCase):
         manager = FakeManager()
         runtime = FakeRuntime(events)
         runtime_arguments: list[object] = []
+        process_lock = FakeProcessLock()
 
         def runtime_factory(*args: object, **kwargs: object) -> FakeRuntime:
             runtime_arguments.extend(args)
@@ -156,6 +187,7 @@ class MainEntryPointTests(unittest.TestCase):
             adapter_factory=lambda: adapter,  # type: ignore[arg-type]
             manager_factory=lambda value: manager,  # type: ignore[arg-type]
             runtime_factory=runtime_factory,
+            lock_factory=lambda: process_lock,
         )
 
         self.assertEqual(result, 7)
@@ -164,6 +196,7 @@ class MainEntryPointTests(unittest.TestCase):
         self.assertIs(runtime_arguments[1], manager)
         self.assertIsInstance(runtime_arguments[2], ConsoleConnectionReporter)
         self.assertEqual(runtime.stop_count, 1)
+        self.assertEqual(process_lock.unlock_count, 1)
 
     def test_application_shutdown_stops_runtime(self) -> None:
         events: list[str] = []
@@ -176,6 +209,7 @@ class MainEntryPointTests(unittest.TestCase):
             adapter_factory=FakeAdapter,  # type: ignore[arg-type]
             manager_factory=lambda adapter: FakeManager(),  # type: ignore[arg-type]
             runtime_factory=lambda *args, **kwargs: runtime,
+            lock_factory=FakeProcessLock,
         )
 
         self.assertEqual(runtime.stop_count, 1)
@@ -192,6 +226,7 @@ class MainEntryPointTests(unittest.TestCase):
                 adapter_factory=FakeAdapter,  # type: ignore[arg-type]
                 manager_factory=lambda adapter: FakeManager(),  # type: ignore[arg-type]
                 runtime_factory=lambda *args, **kwargs: runtime,
+                lock_factory=FakeProcessLock,
             )
 
         self.assertEqual(runtime.stop_count, 1)
@@ -212,6 +247,7 @@ class MainEntryPointTests(unittest.TestCase):
                 adapter_factory=FakeAdapter,  # type: ignore[arg-type]
                 manager_factory=lambda adapter: FakeManager(),  # type: ignore[arg-type]
                 runtime_factory=lambda *args, **kwargs: runtime,
+                lock_factory=FakeProcessLock,
             )
 
         self.assertEqual(runtime.stop_count, 1)
@@ -230,9 +266,57 @@ class MainEntryPointTests(unittest.TestCase):
                 adapter_factory=lambda: adapter,  # type: ignore[arg-type]
                 manager_factory=fail_manager,  # type: ignore[arg-type]
                 runtime_factory=lambda *args, **kwargs: FakeRuntime(events),
+                lock_factory=FakeProcessLock,
             )
 
         self.assertEqual(adapter.close_count, 1)
+
+    def test_second_instance_exits_before_application_and_adapter_creation(self) -> None:
+        output = io.StringIO()
+
+        def unexpected_factory(*args: object) -> object:
+            raise AssertionError("component factory must not be called")
+
+        with contextlib.redirect_stdout(output):
+            exit_code = run(
+                [],
+                application_factory=unexpected_factory,  # type: ignore[arg-type]
+                adapter_factory=unexpected_factory,  # type: ignore[arg-type]
+                manager_factory=unexpected_factory,  # type: ignore[arg-type]
+                runtime_factory=unexpected_factory,  # type: ignore[arg-type]
+                lock_factory=lambda: FakeProcessLock([False]),
+            )
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(output.getvalue().strip(), "QZ BRIEFING ALREADY RUNNING")
+
+    def test_stale_lock_is_removed_and_acquired_once(self) -> None:
+        process_lock = FakeProcessLock([False, True], stale_result=True)
+
+        self.assertTrue(acquire_process_lock(process_lock))
+        self.assertEqual(process_lock.try_calls, [0, 0])
+        self.assertEqual(process_lock.remove_stale_count, 1)
+
+    def test_live_lock_cannot_be_removed(self) -> None:
+        process_lock = FakeProcessLock([False], stale_result=False)
+
+        self.assertFalse(acquire_process_lock(process_lock))
+        self.assertEqual(process_lock.try_calls, [0])
+        self.assertEqual(process_lock.remove_stale_count, 1)
+
+    def test_startup_failure_releases_process_lock(self) -> None:
+        process_lock = FakeProcessLock()
+
+        with self.assertRaisesRegex(RuntimeError, "application failed"):
+            run(
+                [],
+                application_factory=lambda arguments: (_ for _ in ()).throw(
+                    RuntimeError("application failed")
+                ),
+                lock_factory=lambda: process_lock,
+            )
+
+        self.assertEqual(process_lock.unlock_count, 1)
 
     def test_connected_start_skips_commconnect_and_reports_connected(self) -> None:
         connection = FakeConnection(1)
