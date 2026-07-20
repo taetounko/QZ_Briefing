@@ -18,6 +18,14 @@ from .qax_adapter import (
     KiwoomMasterDataError,
     KiwoomQAxAdapter,
 )
+from .tr_requests import (
+    KiwoomTrClosedError,
+    KiwoomTrError,
+    KiwoomTrRequestQueue,
+    KiwoomTrTimeoutError,
+    ScreenNumberPool,
+    TrRequest,
+)
 
 __all__ = [
     "ConnectionConfig",
@@ -34,4 +42,10 @@ __all__ = [
     "KiwoomLoginEventError",
     "KiwoomMasterDataError",
     "KiwoomQAxAdapter",
+    "KiwoomTrClosedError",
+    "KiwoomTrError",
+    "KiwoomTrRequestQueue",
+    "KiwoomTrTimeoutError",
+    "ScreenNumberPool",
+    "TrRequest",
 ]

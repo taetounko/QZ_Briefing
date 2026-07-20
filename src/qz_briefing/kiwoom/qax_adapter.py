@@ -8,6 +8,7 @@ from typing import Protocol
 
 KIWOOM_CONTROL_ID = "KHOPENAPI.KHOpenAPICtrl.1"
 LoginEventListener = Callable[[int], None]
+TrDataListener = Callable[..., None]
 
 
 class KiwoomAdapterError(Exception):
@@ -50,6 +51,7 @@ class SignalLike(Protocol):
 
 class QAxWidgetLike(Protocol):
     OnEventConnect: SignalLike
+    OnReceiveTrData: SignalLike
 
     def setControl(self, control_id: str) -> bool: ...
 
@@ -89,6 +91,7 @@ class KiwoomQAxAdapter:
         factory = widget_factory or _create_qax_widget
         self._widget = widget if widget is not None else factory()
         self._listeners: list[LoginEventListener] = []
+        self._tr_data_listeners: list[TrDataListener] = []
         self._closed = False
         self._signal_connected = False
         self._listener_error_count = 0
@@ -98,6 +101,8 @@ class KiwoomQAxAdapter:
         self._last_login_error_code: int | None = None
         self._last_connect_state: int | None = None
         self._signal_handler = self._handle_login_event
+        self._tr_data_signal_handler = self._handle_tr_data
+        self._tr_data_signal_connected = False
 
         try:
             if not uses_default_factory:
@@ -113,6 +118,8 @@ class KiwoomQAxAdapter:
 
             self._widget.OnEventConnect.connect(self._signal_handler)
             self._signal_connected = True
+            self._widget.OnReceiveTrData.connect(self._tr_data_signal_handler)
+            self._tr_data_signal_connected = True
         except KiwoomAdapterError:
             self._closed = True
             self._dispose_widget()
@@ -194,6 +201,48 @@ class KiwoomQAxAdapter:
         """Return the raw reference/previous-close price master value."""
         return self._get_required_master_text("GetMasterLastPrice(QString)", code)
 
+    def set_input_value(self, item: str, value: str) -> None:
+        """Set one input for a subsequent read-only TR request."""
+        self._ensure_open()
+        self._widget.dynamicCall("SetInputValue(QString, QString)", item, value)
+
+    def request_tr(
+        self, request_name: str, tr_code: str, previous_next: int, screen_no: str
+    ) -> int:
+        """Submit one read-only TR request and return its immediate result."""
+        self._ensure_open()
+        result = self._widget.dynamicCall(
+            "CommRqData(QString, QString, int, QString)",
+            request_name,
+            tr_code,
+            previous_next,
+            screen_no,
+        )
+        return int(result)
+
+    def get_comm_data(
+        self,
+        tr_code: str,
+        request_name: str,
+        index: int,
+        item_name: str,
+    ) -> str:
+        """Read one field while handling the matching TR callback."""
+        self._ensure_open()
+        value = self._widget.dynamicCall(
+            "GetCommData(QString, QString, int, QString)",
+            tr_code,
+            request_name,
+            index,
+            item_name,
+        )
+        return str(value).strip()
+
+    def add_tr_data_listener(self, callback: TrDataListener) -> None:
+        self._ensure_open()
+        if callback not in self._tr_data_listeners:
+            self._tr_data_listeners.append(callback)
+
     def add_login_event_listener(self, callback: LoginEventListener) -> None:
         """Register a callback once without storing authentication data."""
         self._ensure_open()
@@ -215,7 +264,15 @@ class KiwoomQAxAdapter:
                 self._cleanup_error_count += 1
             self._signal_connected = False
 
+        if self._tr_data_signal_connected:
+            try:
+                self._widget.OnReceiveTrData.disconnect(self._tr_data_signal_handler)
+            except Exception:
+                self._cleanup_error_count += 1
+            self._tr_data_signal_connected = False
+
         self._listeners.clear()
+        self._tr_data_listeners.clear()
         self._dispose_widget()
 
     def _handle_login_event(self, raw_error_code: object) -> None:
@@ -232,6 +289,13 @@ class KiwoomQAxAdapter:
         for callback in tuple(self._listeners):
             try:
                 callback(error_code)
+            except Exception:
+                self._listener_error_count += 1
+
+    def _handle_tr_data(self, *arguments: object) -> None:
+        for callback in tuple(self._tr_data_listeners):
+            try:
+                callback(*arguments)
             except Exception:
                 self._listener_error_count += 1
 

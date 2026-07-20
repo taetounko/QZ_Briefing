@@ -42,9 +42,9 @@ class FakeSignal:
         self.disconnect_count += 1
         self.callbacks.remove(callback)
 
-    def emit(self, error_code: object) -> None:
+    def emit(self, *arguments: object) -> None:
         for callback in tuple(self.callbacks):
-            callback(error_code)
+            callback(*arguments)
 
 
 class FakeQAxWidget:
@@ -57,6 +57,7 @@ class FakeQAxWidget:
         request_result: object = 0,
     ) -> None:
         self.OnEventConnect = FakeSignal()
+        self.OnReceiveTrData = FakeSignal()
         self.set_control_result = set_control_result
         self.is_null = is_null
         self.connect_state = connect_state
@@ -65,6 +66,8 @@ class FakeQAxWidget:
         self.dynamic_call_calls: list[str] = []
         self.master_names = {"005930": "삼성전자"}
         self.master_prices = {"005930": "+72,500"}
+        self.comm_data = {("OPT10001", "stock", 0, "현재가"): " +72,500 "}
+        self.dynamic_call_arguments: list[tuple[object, ...]] = []
         self.close_count = 0
         self.delete_later_count = 0
 
@@ -77,6 +80,7 @@ class FakeQAxWidget:
 
     def dynamicCall(self, signature: str, *arguments: object) -> object:
         self.dynamic_call_calls.append(signature)
+        self.dynamic_call_arguments.append(arguments)
         if signature == "GetConnectState()":
             return self.connect_state
         if signature == "CommConnect()":
@@ -85,6 +89,12 @@ class FakeQAxWidget:
             return self.master_names[str(arguments[0])]
         if signature == "GetMasterLastPrice(QString)":
             return self.master_prices[str(arguments[0])]
+        if signature == "SetInputValue(QString, QString)":
+            return None
+        if signature == "CommRqData(QString, QString, int, QString)":
+            return 0
+        if signature == "GetCommData(QString, QString, int, QString)":
+            return self.comm_data[tuple(arguments)]
         raise AssertionError(f"Unexpected dynamicCall signature: {signature}")
 
     def close(self) -> None:
@@ -95,6 +105,23 @@ class FakeQAxWidget:
 
 
 class KiwoomQAxAdapterTests(unittest.TestCase):
+    def test_read_only_tr_wrappers_forward_arguments_and_trim_data(self) -> None:
+        widget = FakeQAxWidget()
+        adapter = KiwoomQAxAdapter(widget=widget)
+        adapter.set_input_value("종목코드", "005930")
+        result = adapter.request_tr("stock", "OPT10001", 0, "1000")
+        value = adapter.get_comm_data("OPT10001", "stock", 0, "현재가")
+        self.assertEqual(result, 0)
+        self.assertEqual(value, "+72,500")
+        self.assertEqual(
+            widget.dynamic_call_arguments[-3:],
+            [
+                ("종목코드", "005930"),
+                ("stock", "OPT10001", 0, "1000"),
+                ("OPT10001", "stock", 0, "현재가"),
+            ],
+        )
+
     def test_read_only_master_data_wrappers_use_explicit_signatures(self) -> None:
         widget = FakeQAxWidget()
         adapter = KiwoomQAxAdapter(widget=widget)

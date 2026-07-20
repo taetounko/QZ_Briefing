@@ -14,12 +14,14 @@ from qz_briefing.briefing import (
     BriefingType,
     DailyBriefingPipeline,
     KiwoomCoreMarketCollector,
+    KiwoomStockBasicDataSource,
 )
 from qz_briefing.kiwoom import (
     ConnectionState,
     ConnectionTransition,
     KiwoomConnectionManager,
     KiwoomQAxAdapter,
+    KiwoomTrRequestQueue,
 )
 from qz_briefing.runtime import QtConnectionRuntime
 from qz_briefing.runtime.automatic_shutdown import GracefulShutdownController
@@ -66,8 +68,9 @@ BriefingSchedulerFactory = Callable[
 ]
 LocalClock = Callable[[], datetime]
 BriefingPipelineFactory = Callable[
-    [LocalClock, KiwoomQAxAdapter], DailyBriefingPipeline
+    [LocalClock, KiwoomTrRequestQueue], DailyBriefingPipeline
 ]
+TrQueueFactory = Callable[[KiwoomQAxAdapter], KiwoomTrRequestQueue]
 
 
 def check_market_day(target_date: date) -> TradingDayResult:
@@ -76,7 +79,7 @@ def check_market_day(target_date: date) -> TradingDayResult:
 
 
 def create_briefing_pipeline(
-    clock: LocalClock, adapter: KiwoomQAxAdapter
+    clock: LocalClock, tr_queue: KiwoomTrRequestQueue
 ) -> DailyBriefingPipeline:
     """Build one process-wide offline pipeline and its result storage."""
     storage = BriefingStorage(
@@ -84,7 +87,11 @@ def create_briefing_pipeline(
     )
     return DailyBriefingPipeline(
         storage,
-        [KiwoomCoreMarketCollector(adapter, clock=clock)],
+        [
+            KiwoomCoreMarketCollector(
+                KiwoomStockBasicDataSource(tr_queue), clock=clock
+            )
+        ],
         clock=clock,
     )
 
@@ -195,6 +202,7 @@ def run(
     market_day_checker: MarketDayChecker = check_market_day,
     briefing_scheduler_factory: BriefingSchedulerFactory = BriefingScheduler,
     briefing_pipeline_factory: BriefingPipelineFactory = create_briefing_pipeline,
+    tr_queue_factory: TrQueueFactory = KiwoomTrRequestQueue,
     clock: LocalClock = datetime.now,
 ) -> int:
     """Assemble the connection runtime and keep the Qt event loop running."""
@@ -242,7 +250,9 @@ def run(
         adapter = adapter_factory()
         print("KIWOOM OCX READY", flush=True)
         manager = manager_factory(adapter)
-        pipeline = briefing_pipeline_factory(clock, adapter)
+        tr_queue = tr_queue_factory(adapter)
+        shutdown_controller.attach_briefing_scheduler(tr_queue)
+        pipeline = briefing_pipeline_factory(clock, tr_queue)
         dispatcher = ConnectionAwareBriefingDispatcher(
             connection_state=lambda: manager.state,
             shutdown_started=lambda: shutdown_controller.shutdown_started,

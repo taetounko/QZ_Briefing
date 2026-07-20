@@ -120,6 +120,15 @@ class FakeBriefingPipeline:
         return object()
 
 
+class FakeTrQueue:
+    def __init__(self, adapter: object) -> None:
+        self.adapter = adapter
+        self.stopped = False
+
+    def stop(self) -> None:
+        self.stopped = True
+
+
 def run(*args: object, **kwargs: object) -> int:
     """Run entry-point tests with a deterministic non-Qt shutdown controller."""
     kwargs.setdefault("shutdown_controller_factory", FakeShutdownController)
@@ -130,6 +139,7 @@ def run(*args: object, **kwargs: object) -> int:
         ),
     )
     kwargs.setdefault("briefing_scheduler_factory", FakeBriefingScheduler)
+    kwargs.setdefault("tr_queue_factory", FakeTrQueue)
     kwargs.setdefault("clock", lambda: datetime(2026, 7, 20, 9, 0))
     return application_run(*args, **kwargs)  # type: ignore[arg-type]
 

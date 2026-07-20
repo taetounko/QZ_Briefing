@@ -6,6 +6,8 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Protocol
 
+from qz_briefing.kiwoom.tr_requests import KiwoomTrRequestQueue, TrRequest
+
 from .models import BriefingContext
 
 
@@ -15,10 +17,8 @@ class BriefingCollector(Protocol):
     def collect(self, context: BriefingContext) -> object: ...
 
 
-class KiwoomMasterDataSource(Protocol):
-    def get_master_code_name(self, code: str) -> str: ...
-
-    def get_master_last_price(self, code: str) -> str: ...
+class StockBasicDataSource(Protocol):
+    def get_stock_basic_info(self, code: str) -> dict[str, str]: ...
 
 
 CORE_SECURITIES = (
@@ -35,6 +35,52 @@ def normalize_price(raw_value: str) -> int:
     return abs(int(compact))
 
 
+def normalize_integer(raw_value: str, *, absolute: bool = False) -> int | None:
+    compact = str(raw_value).strip().replace(",", "")
+    if not compact:
+        return None
+    value = int(compact)
+    return abs(value) if absolute else value
+
+
+def normalize_decimal(raw_value: str) -> float | None:
+    compact = str(raw_value).strip().replace(",", "")
+    if not compact:
+        return None
+    return float(compact)
+
+
+STOCK_BASIC_FIELDS = (
+    "종목코드",
+    "종목명",
+    "현재가",
+    "전일대비",
+    "등락율",
+    "시가",
+    "고가",
+    "저가",
+    "거래량",
+    "기준가",
+)
+
+
+class KiwoomStockBasicDataSource:
+    """Issue the locally documented OPT10001 read-only request."""
+
+    def __init__(self, tr_queue: KiwoomTrRequestQueue) -> None:
+        self._tr_queue = tr_queue
+
+    def get_stock_basic_info(self, code: str) -> dict[str, str]:
+        return self._tr_queue.request(
+            TrRequest(
+                request_name=f"qz_stock_basic_{code}",
+                tr_code="OPT10001",
+                inputs={"종목코드": code},
+                output_fields=STOCK_BASIC_FIELDS,
+            )
+        )
+
+
 class KiwoomCoreMarketCollector:
     """Collect read-only master data for two core Korean securities."""
 
@@ -42,7 +88,7 @@ class KiwoomCoreMarketCollector:
 
     def __init__(
         self,
-        data_source: KiwoomMasterDataSource,
+        data_source: StockBasicDataSource,
         clock: Callable[[], datetime] = datetime.now,
     ) -> None:
         self._data_source = data_source
@@ -58,17 +104,61 @@ class KiwoomCoreMarketCollector:
                 "code": code,
                 "name": None,
                 "expected_name": expected_name,
-                "reference_price_raw": None,
+                "current_price": None,
+                "change": None,
+                "change_rate": None,
+                "open": None,
+                "high": None,
+                "low": None,
+                "volume": None,
                 "reference_price": None,
+                "raw": {},
                 "collected_at": collected_at,
                 "warnings": [],
             }
             item_warnings: list[str] = item["warnings"]  # type: ignore[assignment]
             try:
-                item["name"] = self._data_source.get_master_code_name(code)
-                raw_price = self._data_source.get_master_last_price(code)
-                item["reference_price_raw"] = raw_price
-                item["reference_price"] = normalize_price(raw_price)
+                raw = self._data_source.get_stock_basic_info(code)
+                item["raw"] = dict(raw)
+                item["code"] = raw.get("종목코드", code).strip() or code
+                item["name"] = raw.get("종목명", "").strip() or None
+                normalizers = {
+                    "current_price": (
+                        "현재가",
+                        lambda value: normalize_integer(value, absolute=True),
+                    ),
+                    "change": ("전일대비", normalize_integer),
+                    "change_rate": ("등락율", normalize_decimal),
+                    "open": (
+                        "시가",
+                        lambda value: normalize_integer(value, absolute=True),
+                    ),
+                    "high": (
+                        "고가",
+                        lambda value: normalize_integer(value, absolute=True),
+                    ),
+                    "low": (
+                        "저가",
+                        lambda value: normalize_integer(value, absolute=True),
+                    ),
+                    "volume": (
+                        "거래량",
+                        lambda value: normalize_integer(value, absolute=True),
+                    ),
+                    "reference_price": (
+                        "기준가",
+                        lambda value: normalize_integer(value, absolute=True),
+                    ),
+                }
+                for output_name, (field, normalizer) in normalizers.items():
+                    try:
+                        item[output_name] = normalizer(raw.get(field, ""))
+                    except (TypeError, ValueError) as exc:
+                        warning = (
+                            f"{code} invalid {field}: {type(exc).__name__}: {exc}"
+                        )
+                        item_warnings.append(warning)
+                        warnings.append(warning)
             except Exception as exc:
                 warning = f"{code} collection failed: {type(exc).__name__}: {exc}"
                 item_warnings.append(warning)
@@ -79,6 +169,7 @@ class KiwoomCoreMarketCollector:
             "collected_at": collected_at,
             "securities": securities,
             "warnings": warnings,
+            "errors": warnings,
         }
 
 

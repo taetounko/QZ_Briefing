@@ -81,8 +81,15 @@ class DailyBriefingPipeline:
                 print(f"briefing collector started: {collector.name}", flush=True)
                 try:
                     data = collector.collect(context)
+                    collector_errors = (
+                        data.get("errors", []) if isinstance(data, dict) else []
+                    )
+                    if collector_errors:
+                        context.errors.extend(
+                            f"{collector.name}: {error}" for error in collector_errors
+                        )
                     collector_results[collector.name] = {
-                        "status": "success",
+                        "status": "error" if collector_errors else "success",
                         "data": data,
                         "error": None,
                     }
