@@ -64,6 +64,22 @@ STOCK_BASIC_FIELDS = (
     "기준가",
 )
 
+MARKET_INDEX_FIELDS = (
+    "현재가",
+    "전일대비",
+    "등락률",
+    "시가",
+    "고가",
+    "저가",
+    "거래량",
+    "거래대금",
+)
+
+MARKET_INDEX_TARGETS = (
+    ("KOSPI", "0", "001", "코스피"),
+    ("KOSDAQ", "1", "101", "코스닥"),
+)
+
 
 class KiwoomStockBasicDataSource:
     """Issue the locally documented OPT10001 read-only request."""
@@ -78,6 +94,29 @@ class KiwoomStockBasicDataSource:
                 tr_code="OPT10001",
                 inputs={"종목코드": code},
                 output_fields=STOCK_BASIC_FIELDS,
+            )
+        )
+
+
+class MarketIndexDataSource(Protocol):
+    def get_market_index(self, market_code: str, industry_code: str) -> dict[str, str]: ...
+
+
+class KiwoomMarketIndexDataSource:
+    """Issue the locally documented OPT20001 read-only request."""
+
+    def __init__(self, tr_queue: KiwoomTrRequestQueue) -> None:
+        self._tr_queue = tr_queue
+
+    def get_market_index(
+        self, market_code: str, industry_code: str
+    ) -> dict[str, str]:
+        return self._tr_queue.request(
+            TrRequest(
+                request_name=f"qz_market_index_{industry_code}",
+                tr_code="OPT20001",
+                inputs={"시장구분": market_code, "업종코드": industry_code},
+                output_fields=MARKET_INDEX_FIELDS,
             )
         )
 
@@ -171,6 +210,86 @@ class KiwoomCoreMarketCollector:
             "securities": securities,
             "warnings": warnings,
             "errors": warnings,
+        }
+
+
+class KiwoomMarketIndexCollector:
+    """Collect KOSPI and KOSDAQ index data with per-market isolation."""
+
+    name = "kiwoom_market_indices"
+
+    def __init__(
+        self,
+        data_source: MarketIndexDataSource,
+        clock: Callable[[], datetime] = datetime.now,
+    ) -> None:
+        self._data_source = data_source
+        self._clock = clock
+
+    def collect(self, context: BriefingContext) -> dict[str, object]:
+        del context
+        collected_at = self._clock().isoformat()
+        indices: list[dict[str, object]] = []
+        warnings: list[str] = []
+        errors: list[str] = []
+        for market, market_code, industry_code, name in MARKET_INDEX_TARGETS:
+            item: dict[str, object] = {
+                "market": market,
+                "code": industry_code,
+                "name": name,
+                "current": None,
+                "change": None,
+                "change_rate": None,
+                "open": None,
+                "high": None,
+                "low": None,
+                "volume": None,
+                "trading_value": None,
+                "collected_at": collected_at,
+                "raw": {},
+                "warnings": [],
+            }
+            item_warnings: list[str] = item["warnings"]  # type: ignore[assignment]
+            try:
+                raw = self._data_source.get_market_index(market_code, industry_code)
+                item["raw"] = dict(raw)
+                normalizers = {
+                    "current": ("현재가", normalize_decimal),
+                    "change": ("전일대비", normalize_decimal),
+                    "change_rate": ("등락률", normalize_decimal),
+                    "open": ("시가", normalize_decimal),
+                    "high": ("고가", normalize_decimal),
+                    "low": ("저가", normalize_decimal),
+                    "volume": (
+                        "거래량",
+                        lambda value: normalize_integer(value, absolute=True),
+                    ),
+                    "trading_value": (
+                        "거래대금",
+                        lambda value: normalize_integer(value, absolute=True),
+                    ),
+                }
+                for output_name, (field, normalizer) in normalizers.items():
+                    try:
+                        item[output_name] = normalizer(raw.get(field, ""))
+                    except (TypeError, ValueError) as exc:
+                        warning = (
+                            f"{market} invalid {field}: {type(exc).__name__}: {exc}"
+                        )
+                        item_warnings.append(warning)
+                        warnings.append(warning)
+            except Exception as exc:
+                error = f"{market} collection failed: {type(exc).__name__}: {exc}"
+                item_warnings.append(error)
+                warnings.append(error)
+                errors.append(error)
+            indices.append(item)
+        return {
+            "collector": self.name,
+            "collected_at": collected_at,
+            "indices": indices,
+            "warnings": warnings,
+            "errors": errors,
         }
 
 

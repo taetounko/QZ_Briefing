@@ -2,6 +2,8 @@
 
 from .collectors import (
     KiwoomCoreMarketCollector,
+    KiwoomMarketIndexCollector,
+    KiwoomMarketIndexDataSource,
     KiwoomStockBasicDataSource,
     PlaceholderCollector,
     normalize_decimal,
@@ -18,6 +20,8 @@ __all__ = [
     "BriefingType",
     "DailyBriefingPipeline",
     "KiwoomCoreMarketCollector",
+    "KiwoomMarketIndexCollector",
+    "KiwoomMarketIndexDataSource",
     "KiwoomStockBasicDataSource",
     "PlaceholderCollector",
     "normalize_price",
