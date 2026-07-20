@@ -75,9 +75,12 @@ class FakeConnectionManager:
         self.login_events: list[int] = []
         self.tick_error: Exception | None = None
         self.on_tick: object | None = None
+        self.on_start: object | None = None
 
     def start(self) -> None:
         self.start_count += 1
+        if self.on_start is not None:
+            self.on_start()
 
     def tick(self) -> None:
         self.tick_count += 1
@@ -142,6 +145,11 @@ class QtConnectionRuntimeTests(unittest.TestCase):
         self.runtime.start()
         self.adapter.emit_login(-101)
         self.assertEqual(self.manager.login_events, [-101])
+
+    def test_login_event_during_start_is_forwarded(self) -> None:
+        self.manager.on_start = lambda: self.adapter.emit_login(0)
+        self.runtime.start()
+        self.assertEqual(self.manager.login_events, [0])
 
     def test_timeout_reentry_is_ignored(self) -> None:
         self.manager.on_tick = self.timer.timeout.emit

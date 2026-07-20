@@ -92,12 +92,19 @@ class QtConnectionRuntime:
             self._timer.timeout.connect(self._handle_timeout)
             self._timeout_connected = True
 
-        self._connection_manager.start()
-        interval_ms = round(
-            self._connection_manager.config.check_interval_seconds * 1000
-        )
-        self._timer.start(interval_ms)
+        # CommConnect normally completes asynchronously, but the OCX may deliver
+        # OnEventConnect while start() is still on the stack.  Mark the runtime
+        # active before asking the manager to connect so that event is not lost.
         self._started = True
+        try:
+            self._connection_manager.start()
+            interval_ms = round(
+                self._connection_manager.config.check_interval_seconds * 1000
+            )
+            self._timer.start(interval_ms)
+        except Exception:
+            self._started = False
+            raise
         self._notify_state_change()
         return True
 
