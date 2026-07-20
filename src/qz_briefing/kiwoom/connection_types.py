@@ -25,6 +25,7 @@ class ConnectionConfig:
     check_interval_seconds: float = 30
     reconnect_delay_seconds: float = 60
     max_reconnect_attempts: int = 3
+    login_timeout_seconds: float = 300
 
     def __post_init__(self) -> None:
         if self.check_interval_seconds < 0:
@@ -33,6 +34,8 @@ class ConnectionConfig:
             raise ValueError("reconnect_delay_seconds must be non-negative")
         if self.max_reconnect_attempts < 1:
             raise ValueError("max_reconnect_attempts must be at least 1")
+        if self.login_timeout_seconds <= 0:
+            raise ValueError("login_timeout_seconds must be positive")
 
 
 @runtime_checkable

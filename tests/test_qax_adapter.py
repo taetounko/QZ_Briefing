@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -18,11 +19,13 @@ from qz_briefing.kiwoom import (  # noqa: E402
     KiwoomAdapterClosedError,
     KiwoomConnection,
     KiwoomConnectionManager,
+    KiwoomConnectionRequestError,
     KiwoomConnectionStateError,
     KiwoomControlBindingError,
     KiwoomQAxAdapter,
 )
 from qz_briefing.kiwoom.qax_adapter import KIWOOM_CONTROL_ID  # noqa: E402
+from qz_briefing.kiwoom import qax_adapter as qax_adapter_module  # noqa: E402
 
 
 class FakeSignal:
@@ -86,6 +89,12 @@ class FakeQAxWidget:
 
 
 class KiwoomQAxAdapterTests(unittest.TestCase):
+    def test_default_factory_widget_is_not_rebound(self) -> None:
+        widget = FakeQAxWidget()
+        with patch.object(qax_adapter_module, "_create_qax_widget", return_value=widget):
+            KiwoomQAxAdapter()
+        self.assertEqual(widget.set_control_calls, [])
+
     def test_binds_default_control_id(self) -> None:
         widget = FakeQAxWidget()
         KiwoomQAxAdapter(widget=widget)
@@ -125,6 +134,26 @@ class KiwoomQAxAdapterTests(unittest.TestCase):
         adapter = KiwoomQAxAdapter(widget=widget)
         self.assertEqual(adapter.request_connect(), -1)
         self.assertEqual(widget.dynamic_call_calls, ["CommConnect()"])
+        self.assertEqual(adapter.connect_request_count, 1)
+
+    def test_second_request_connect_is_rejected_without_calling_ocx(self) -> None:
+        widget = FakeQAxWidget()
+        adapter = KiwoomQAxAdapter(widget=widget)
+        adapter.request_connect()
+        with self.assertRaises(KiwoomConnectionRequestError):
+            adapter.request_connect()
+        self.assertEqual(widget.dynamic_call_calls, ["CommConnect()"])
+
+    def test_connection_diagnostics_track_state_and_login_event(self) -> None:
+        widget = FakeQAxWidget(connect_state=0)
+        adapter = KiwoomQAxAdapter(widget=widget)
+
+        self.assertEqual(adapter.get_connect_state(), 0)
+        widget.OnEventConnect.emit(-101)
+
+        self.assertEqual(adapter.last_connect_state, 0)
+        self.assertEqual(adapter.login_event_count, 1)
+        self.assertEqual(adapter.last_login_error_code, -101)
 
     def test_signal_is_connected_once(self) -> None:
         widget = FakeQAxWidget()

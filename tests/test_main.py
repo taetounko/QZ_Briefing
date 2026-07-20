@@ -49,6 +49,10 @@ class FakeApplication:
 class FakeAdapter:
     def __init__(self) -> None:
         self.close_count = 0
+        self.connect_request_count = 0
+        self.login_event_count = 0
+        self.last_login_error_code: int | None = None
+        self.last_connect_state: int | None = None
 
     def close(self) -> None:
         self.close_count += 1
@@ -97,6 +101,22 @@ class FakeConnection:
 
 
 class MainEntryPointTests(unittest.TestCase):
+    def test_run_logs_process_pid(self) -> None:
+        events: list[str] = []
+        output = io.StringIO()
+        with (
+            patch("qz_briefing.__main__.os.getpid", return_value=12345),
+            contextlib.redirect_stdout(output),
+        ):
+            run(
+                [],
+                application_factory=lambda arguments: FakeApplication(events),
+                adapter_factory=FakeAdapter,  # type: ignore[arg-type]
+                manager_factory=lambda adapter: FakeManager(),  # type: ignore[arg-type]
+                runtime_factory=lambda *args, **kwargs: FakeRuntime(events),
+            )
+        self.assertIn("PROCESS PID: 12345", output.getvalue())
+
     def test_main_returns_event_loop_exit_code(self) -> None:
         with patch("qz_briefing.__main__.run", return_value=9):
             self.assertEqual(main(), 9)
@@ -259,6 +279,24 @@ class MainEntryPointTests(unittest.TestCase):
 
         self.assertIn("LOGIN SUCCESS", output.getvalue())
         self.assertIn("LOGIN FAILED", output.getvalue())
+
+    def test_reporter_logs_adapter_diagnostics(self) -> None:
+        connection = FakeConnection(0)
+        manager = KiwoomConnectionManager(connection)
+        adapter = FakeAdapter()
+        adapter.connect_request_count = 1
+        adapter.login_event_count = 1
+        adapter.last_login_error_code = 0
+        adapter.last_connect_state = 1
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            reporter = ConsoleConnectionReporter(manager, adapter)  # type: ignore[arg-type]
+            reporter(object())  # type: ignore[arg-type]
+
+        self.assertIn("COMMCONNECT CALL COUNT: 1", output.getvalue())
+        self.assertIn("ONEVENTCONNECT ERROR CODE: 0", output.getvalue())
+        self.assertIn("GETCONNECTSTATE RESULT: 1", output.getvalue())
 
 
 if __name__ == "__main__":

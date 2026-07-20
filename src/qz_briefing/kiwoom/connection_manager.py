@@ -1,4 +1,4 @@
-"""Testable Kiwoom connection monitoring and bounded reconnection logic."""
+"""Testable Kiwoom connection monitoring with one login request per process."""
 
 from __future__ import annotations
 
@@ -35,6 +35,8 @@ class KiwoomConnectionManager:
         self._last_check_at: float | None = None
         self._request_in_flight = False
         self._current_request_is_reconnect = False
+        self._login_request_attempted = False
+        self._login_deadline: float | None = None
         self._started = False
 
     @property
@@ -79,6 +81,11 @@ class KiwoomConnectionManager:
             return
 
         now = self._clock()
+        if self._state is ConnectionState.CONNECTING:
+            if self._login_deadline is not None and now >= self._login_deadline:
+                self._fail("login response timed out")
+            return
+
         if self._state is ConnectionState.CONNECTED:
             if self._last_check_at is None:
                 self._last_check_at = now
@@ -89,16 +96,8 @@ class KiwoomConnectionManager:
             self._last_check_at = now
             connect_state = self._read_connect_state("periodic connection check")
             if connect_state == 0:
-                self._schedule_reconnect("connection loss detected")
+                self._fail("connection loss detected; restart required")
             return
-
-        if self._state is ConnectionState.RECONNECT_WAIT:
-            if self._reconnect_due_at is not None and now >= self._reconnect_due_at:
-                self._issue_reconnect_request()
-            return
-
-        # CONNECTING deliberately does nothing here so a pending request cannot
-        # be duplicated by repeated timer ticks.
 
     def handle_login_event(self, error_code: int) -> None:
         """Apply one login event received by a future concrete OCX adapter."""
@@ -106,8 +105,9 @@ class KiwoomConnectionManager:
             return
 
         self._request_in_flight = False
+        self._login_deadline = None
         if int(error_code) != 0:
-            self._handle_request_failure("login event reported an error")
+            self._fail("login event reported an error; restart required")
             return
 
         connect_state = self._read_connect_state("post-login connection check")
@@ -117,8 +117,9 @@ class KiwoomConnectionManager:
             self._mark_connected("login event confirmed connected state")
             return
 
-        self._handle_request_failure(
-            "login event succeeded but connection state remained disconnected"
+        self._fail(
+            "login event succeeded but connection state remained disconnected; "
+            "restart required"
         )
 
     def stop(self) -> None:
@@ -129,37 +130,24 @@ class KiwoomConnectionManager:
         self._started = False
         self._request_in_flight = False
         self._reconnect_due_at = None
+        self._login_deadline = None
         self._transition(ConnectionState.STOPPED, "connection manager stopped")
 
     def _issue_initial_request(self) -> None:
-        if self._request_in_flight or self._state is ConnectionState.STOPPED:
+        if (
+            self._request_in_flight
+            or self._login_request_attempted
+            or self._state is ConnectionState.STOPPED
+        ):
             return
 
         self._current_request_is_reconnect = False
+        self._login_request_attempted = True
         self._request_in_flight = True
+        self._login_deadline = self._clock() + self._config.login_timeout_seconds
         self._transition(
             ConnectionState.CONNECTING,
             "startup state was disconnected; initial request started",
-        )
-        self._call_request_connect()
-
-    def _issue_reconnect_request(self) -> None:
-        if self._request_in_flight or self._state is ConnectionState.STOPPED:
-            return
-        if self._reconnect_attempts >= self._config.max_reconnect_attempts:
-            self._transition(
-                ConnectionState.FAILED,
-                "maximum reconnect attempts reached",
-            )
-            return
-
-        self._reconnect_attempts += 1
-        self._current_request_is_reconnect = True
-        self._request_in_flight = True
-        self._reconnect_due_at = None
-        self._transition(
-            ConnectionState.CONNECTING,
-            f"reconnect attempt {self._reconnect_attempts} started",
         )
         self._call_request_connect()
 
@@ -167,42 +155,26 @@ class KiwoomConnectionManager:
         try:
             immediate_result = int(self._connection.request_connect())
         except Exception as exc:
-            self._request_in_flight = False
-            self._handle_request_failure(
-                f"connection request raised {type(exc).__name__}"
+            self._fail(
+                f"connection request raised {type(exc).__name__}; restart required"
             )
             return
 
         if immediate_result != 0:
-            self._request_in_flight = False
-            self._handle_request_failure("connection request was rejected immediately")
+            self._fail("connection request was rejected immediately; restart required")
 
-    def _handle_request_failure(self, reason: str) -> None:
+    def _fail(self, reason: str) -> None:
         self._request_in_flight = False
-        if (
-            self._current_request_is_reconnect
-            and self._reconnect_attempts >= self._config.max_reconnect_attempts
-        ):
-            self._transition(ConnectionState.FAILED, reason)
-            return
-
-        self._schedule_reconnect(reason)
-
-    def _schedule_reconnect(self, reason: str) -> None:
-        if self._state is ConnectionState.STOPPED:
-            return
-
-        self._request_in_flight = False
-        self._reconnect_due_at = (
-            self._clock() + self._config.reconnect_delay_seconds
-        )
-        self._transition(ConnectionState.RECONNECT_WAIT, reason)
+        self._login_deadline = None
+        self._reconnect_due_at = None
+        self._transition(ConnectionState.FAILED, reason)
 
     def _mark_connected(self, reason: str) -> None:
         self._request_in_flight = False
         self._current_request_is_reconnect = False
         self._reconnect_attempts = 0
         self._reconnect_due_at = None
+        self._login_deadline = None
         self._last_check_at = self._clock()
         self._transition(ConnectionState.CONNECTED, reason)
 
@@ -210,17 +182,11 @@ class KiwoomConnectionManager:
         try:
             connect_state = int(self._connection.get_connect_state())
         except Exception as exc:
-            self._transition(
-                ConnectionState.FAILED,
-                f"{context} raised {type(exc).__name__}",
-            )
+            self._fail(f"{context} raised {type(exc).__name__}")
             return None
 
         if connect_state not in (0, 1):
-            self._transition(
-                ConnectionState.FAILED,
-                f"{context} returned an invalid state",
-            )
+            self._fail(f"{context} returned an invalid state")
             return None
         return connect_state
 

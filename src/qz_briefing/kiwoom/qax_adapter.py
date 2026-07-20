@@ -62,10 +62,10 @@ WidgetFactory = Callable[[], QAxWidgetLike]
 
 
 def _create_qax_widget() -> QAxWidgetLike:
-    """Create the real widget lazily; the caller owns QApplication lifecycle."""
+    """Create and bind the real widget exactly as the verified login client does."""
     from PyQt5.QAxContainer import QAxWidget
 
-    return QAxWidget()
+    return QAxWidget(KIWOOM_CONTROL_ID)
 
 
 class KiwoomQAxAdapter:
@@ -81,6 +81,7 @@ class KiwoomQAxAdapter:
                 "Provide either widget or widget_factory, not both"
             )
 
+        uses_default_factory = widget is None and widget_factory is None
         factory = widget_factory or _create_qax_widget
         self._widget = widget if widget is not None else factory()
         self._listeners: list[LoginEventListener] = []
@@ -88,14 +89,19 @@ class KiwoomQAxAdapter:
         self._signal_connected = False
         self._listener_error_count = 0
         self._cleanup_error_count = 0
+        self._connect_request_count = 0
+        self._login_event_count = 0
+        self._last_login_error_code: int | None = None
+        self._last_connect_state: int | None = None
         self._signal_handler = self._handle_login_event
 
         try:
-            binding_result = bool(self._widget.setControl(KIWOOM_CONTROL_ID))
-            if not binding_result:
-                raise KiwoomControlBindingError(
-                    f"setControl failed for {KIWOOM_CONTROL_ID}"
-                )
+            if not uses_default_factory:
+                binding_result = bool(self._widget.setControl(KIWOOM_CONTROL_ID))
+                if not binding_result:
+                    raise KiwoomControlBindingError(
+                        f"setControl failed for {KIWOOM_CONTROL_ID}"
+                    )
             if bool(self._widget.isNull()):
                 raise KiwoomControlBindingError(
                     f"QAxWidget is null after binding {KIWOOM_CONTROL_ID}"
@@ -126,6 +132,22 @@ class KiwoomQAxAdapter:
     def cleanup_error_count(self) -> int:
         return self._cleanup_error_count
 
+    @property
+    def connect_request_count(self) -> int:
+        return self._connect_request_count
+
+    @property
+    def login_event_count(self) -> int:
+        return self._login_event_count
+
+    @property
+    def last_login_error_code(self) -> int | None:
+        return self._last_login_error_code
+
+    @property
+    def last_connect_state(self) -> int | None:
+        return self._last_connect_state
+
     def get_connect_state(self) -> int:
         """Return only the valid Kiwoom connection states 0 and 1."""
         self._ensure_open()
@@ -141,11 +163,17 @@ class KiwoomQAxAdapter:
             raise KiwoomConnectionStateError(
                 f"GetConnectState returned invalid state {connect_state}"
             )
+        self._last_connect_state = connect_state
         return connect_state
 
     def request_connect(self) -> int:
         """Issue exactly one immediate connection request and return its result."""
         self._ensure_open()
+        if self._connect_request_count >= 1:
+            raise KiwoomConnectionRequestError(
+                "CommConnect was already requested by this adapter"
+            )
+        self._connect_request_count += 1
         try:
             raw_result = self._widget.dynamicCall("CommConnect()")
             return int(raw_result)
@@ -185,6 +213,9 @@ class KiwoomQAxAdapter:
             raise KiwoomLoginEventError(
                 "OnEventConnect did not provide an integer error code"
             ) from exc
+
+        self._login_event_count += 1
+        self._last_login_error_code = error_code
 
         for callback in tuple(self._listeners):
             try:

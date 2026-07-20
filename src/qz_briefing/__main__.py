@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable, Sequence
 from typing import Protocol
@@ -44,9 +45,16 @@ def create_application(arguments: Sequence[str]) -> ApplicationLike:
 class ConsoleConnectionReporter:
     """Print new, non-sensitive connection transitions to the console."""
 
-    def __init__(self, manager: KiwoomConnectionManager) -> None:
+    def __init__(
+        self,
+        manager: KiwoomConnectionManager,
+        adapter: KiwoomQAxAdapter | None = None,
+    ) -> None:
         self._manager = manager
+        self._adapter = adapter
         self._reported_transition_count = 0
+        self._reported_connect_request_count = -1
+        self._reported_login_event_count = 0
 
     def __call__(self, runtime: QtConnectionRuntime) -> None:
         del runtime
@@ -54,6 +62,28 @@ class ConsoleConnectionReporter:
         for transition in transitions[self._reported_transition_count :]:
             self._report_transition(transition)
         self._reported_transition_count = len(transitions)
+        self._report_adapter_diagnostics()
+
+    def _report_adapter_diagnostics(self) -> None:
+        if self._adapter is None:
+            return
+        if self._adapter.connect_request_count != self._reported_connect_request_count:
+            self._reported_connect_request_count = self._adapter.connect_request_count
+            print(
+                f"COMMCONNECT CALL COUNT: {self._adapter.connect_request_count}",
+                flush=True,
+            )
+        if self._adapter.login_event_count <= self._reported_login_event_count:
+            return
+        self._reported_login_event_count = self._adapter.login_event_count
+        print(
+            f"ONEVENTCONNECT ERROR CODE: {self._adapter.last_login_error_code}",
+            flush=True,
+        )
+        print(
+            f"GETCONNECTSTATE RESULT: {self._adapter.last_connect_state}",
+            flush=True,
+        )
 
     @staticmethod
     def _report_transition(transition: ConnectionTransition) -> None:
@@ -65,7 +95,7 @@ class ConsoleConnectionReporter:
         )
         if transition.reason == "login event confirmed connected state":
             print("LOGIN SUCCESS", flush=True)
-        elif transition.reason == "login event reported an error":
+        elif transition.reason.startswith("login event reported an error"):
             print("LOGIN FAILED", flush=True)
 
 
@@ -79,13 +109,14 @@ def run(
 ) -> int:
     """Assemble the connection runtime and keep the Qt event loop running."""
     application = application_factory(sys.argv if arguments is None else arguments)
+    print(f"PROCESS PID: {os.getpid()}", flush=True)
     print("QAPPLICATION READY", flush=True)
     adapter = adapter_factory()
     print("KIWOOM OCX READY", flush=True)
     runtime: QtConnectionRuntime | None = None
     try:
         manager = manager_factory(adapter)
-        reporter = ConsoleConnectionReporter(manager)
+        reporter = ConsoleConnectionReporter(manager, adapter)
         runtime = runtime_factory(adapter, manager, on_state_change=reporter)
         application.aboutToQuit.connect(runtime.stop)
         if not runtime.start():
