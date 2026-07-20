@@ -20,6 +20,8 @@ from qz_briefing.briefing import (
     KiwoomMarketIndexDataSource,
     KiwoomInvestorFlowCollector,
     KiwoomInvestorFlowDataSource,
+    KiwoomLeadershipCollector,
+    KiwoomLeadershipDataSource,
     KiwoomStockBasicDataSource,
     UnavailableFuturesContractResolver,
 )
@@ -108,6 +110,9 @@ def create_briefing_pipeline(
                 UnavailableFuturesContractResolver(),
                 KiwoomDerivativesDataSource(tr_queue),
                 clock=clock,
+            ),
+            KiwoomLeadershipCollector(
+                KiwoomLeadershipDataSource(tr_queue), clock=clock
             ),
         ],
         clock=clock,

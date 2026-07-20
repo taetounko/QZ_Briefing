@@ -46,7 +46,33 @@ def render_markdown(result: dict[str, object]) -> str:
     lines.extend(["", "## 수집 오류 및 누락 데이터", ""])
     errors = result.get("errors", [])
     lines.extend(f"- {error}" for error in errors) if errors else lines.append("- 수집 오류 없음")
+    lines.extend(render_leadership(result.get("leadership")))
     return "\n".join(lines) + "\n"
+
+
+def render_leadership(value: object) -> list[str]:
+    lines: list[str] = []
+    leadership = value if isinstance(value, dict) else {}
+    for key, title in (("kospi", "코스피 주도주 TOP 10"), ("kosdaq", "코스닥 주도주 TOP 10"), ("rebound_candidates", "바닥 확인 후 반등 후보")):
+        lines.extend(["", f"## {title}", ""])
+        rows = leadership.get(key, [])
+        if not rows:
+            lines.append("- 선정 기준을 통과한 종목이 없습니다.")
+            continue
+        for index, row in enumerate(rows, 1):
+            lines.append(f"{index}. {row.get('name') or '종목명 없음'}({row.get('code')}) — 점수 {row.get('score')}")
+            lines.append(f"   현재가 {quantity(row.get('current_price'), '원')} / 등락률 {percent(row.get('change_rate'))} / 거래대금 {quantity(row.get('trading_value'), '공식 단위')}")
+            lines.append(f"   선정 이유: {', '.join(row.get('reasons', [])) or '데이터 부족'}")
+            lines.append(f"   주의: {', '.join(row.get('warnings', [])) or '점수는 매수 지시가 아닙니다.'}")
+    lines.extend(["", "## 장전 대비 신규·유지·탈락", ""])
+    comparison = leadership.get("comparison_with_pre_market")
+    if isinstance(comparison, dict):
+        for key, label in (("new", "신규"), ("maintained", "유지"), ("dropped", "탈락")):
+            lines.append(f"- {label}: {', '.join(comparison.get(key, [])) or '없음'}")
+    else:
+        lines.append("- 비교 가능한 장전 후보가 없습니다.")
+    lines.extend(["", "## 선정 기준과 주의사항", "", "- 상승률뿐 아니라 거래대금 순위, 시가·고가 위치, 상대강도와 기술 이력을 함께 평가합니다.", "- 선정 결과는 시장 관찰용이며 매수 지시나 수익 보장이 아닙니다."])
+    return lines
 
 
 def core_number_lines(result: dict[str, object]) -> list[str]:

@@ -13,6 +13,7 @@ from .collectors import (
     normalize_price,
 )
 from .models import BriefingRunResult, BriefingType
+from .leadership import KiwoomLeadershipCollector, KiwoomLeadershipDataSource
 from .derivatives import (
     FuturesContractResolution,
     KiwoomDerivativesDataSource,
@@ -35,6 +36,8 @@ __all__ = [
     "KiwoomMarketIndexDataSource",
     "KiwoomInvestorFlowCollector",
     "KiwoomInvestorFlowDataSource",
+    "KiwoomLeadershipCollector",
+    "KiwoomLeadershipDataSource",
     "KiwoomStockBasicDataSource",
     "PlaceholderCollector",
     "UnavailableFuturesContractResolver",

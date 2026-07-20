@@ -47,6 +47,25 @@ class BriefingStorage:
         json_path, markdown_path = self.result_paths(trading_date, briefing_type)
         return json_path.is_file(), markdown_path.is_file()
 
+    def load_latest_before(
+        self, trading_date: date, briefing_type: BriefingType
+    ) -> dict[str, object] | None:
+        """Load the newest earlier saved result without exposing path logic."""
+        candidates = sorted(
+            self.root.glob(f"*/*/*/{briefing_type.value}.json"), reverse=True
+        )
+        for path in candidates:
+            try:
+                saved_date = date.fromisoformat("-".join(path.parts[-4:-1]))
+            except ValueError:
+                continue
+            if saved_date >= trading_date:
+                continue
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                return loaded
+        return None
+
     def save(
         self,
         trading_date: date,
