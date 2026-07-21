@@ -29,7 +29,8 @@ def test_task_name_is_declared_in_both_scripts() -> None:
 
 def test_install_script_uses_daily_8_am_trigger() -> None:
     content = _read_script(INSTALL_SCRIPT)
-    assert "New-ScheduledTaskTrigger -Daily -At \"08:00\"" in content
+    assert "New-ScheduledTaskTrigger -Daily -At \"06:50\"" in content
+    assert "-MultipleInstances IgnoreNew" in content
 
 
 def test_install_script_uses_project_virtualenv_python() -> None:
