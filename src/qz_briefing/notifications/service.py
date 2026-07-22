@@ -33,7 +33,7 @@ class NotificationService:
             if self.send_markdown_file and markdown and Path(markdown).is_file(): self.adapter.send_document(Path(markdown),"QZ Briefing")
             json_path=item["payload"].get("json_path")
             if self.send_json_file and json_path and Path(json_path).is_file(): self.adapter.send_document(Path(json_path),"QZ JSON")
-            self.queue.remove(item); self.history.append({"key":key,"delivered_at":self.clock().isoformat(),"event_type":item["event_type"]}); self._trim_history(); self.status.last_success_at=self.clock().isoformat(); self.status.last_event=item["event_type"]; self.status.last_error=None
+            self.history.append({"key":key,"delivered_at":self.clock().isoformat(),"event_type":item["event_type"]}); self._trim_history(); self.queue.remove(item); self.status.last_success_at=self.clock().isoformat(); self.status.last_event=item["event_type"]; self.status.last_error=None; self.status.next_attempt_at=None
         except Exception as exc: self.queue.fail(item,exc); self.status.last_error=f"{type(exc).__name__}: delivery failed"; self.status.next_attempt_at=item["next_attempt_at"]
         finally: self._inflight.discard(key); self.status.pending_count=len(self.queue.items)
     def retry_due(self):
@@ -45,6 +45,8 @@ class NotificationService:
             if age>timedelta(days=1) and not str(item["payload"]["text"]).startswith("[지연 전달]"):
                 item["payload"]["text"]="[지연 전달]\n"+str(item["payload"]["text"]); self.queue.save()
             key=self._item_key(item)
+            if any(entry.get("key")==key for entry in self.history):
+                self.queue.remove(item); continue
             if key not in self._inflight:self._inflight.add(key);self.executor.submit(self._deliver,item,key)
     def stop(self):
         self.stopping=True

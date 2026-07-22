@@ -195,6 +195,24 @@ def create_notification_service(project_root: Path, data_root: Path, timer_facto
         return DisabledNotificationService()
 
 
+def enqueue_saved_briefing(notification_service: object, name: str, path: str) -> bool:
+    """Queue a normal briefing only after its persisted JSON can be loaded."""
+    if "validation" in name:
+        return False
+    json_path = Path(path)
+    result = json.loads(json_path.read_text(encoding="utf-8"))
+    if not isinstance(result, dict):
+        return False
+    event_type = str(result.get("briefing_type", ""))
+    if event_type not in {"pre_market", "intraday_10am", "market_close"}:
+        return False
+    return bool(notification_service.submit(NotificationRequest(
+        event_type=event_type,
+        trading_date=str(result.get("trading_date", "")),
+        text=format_briefing(result),
+        markdown_path=str(json_path.with_suffix(".md")),
+        json_path=str(json_path),
+    )))
 def handle_notification_cli(options: argparse.Namespace, project_root: Path, *, input_secret=getpass.getpass, input_text=input, adapter_factory=TelegramAdapter, secret_store_factory=DpapiSecretStore) -> int | None:
     if not (options.configure_telegram or options.disable_telegram or options.test_notification or options.notification_status):
         return None
@@ -486,13 +504,7 @@ def run(
         if hasattr(pipeline, "add_completion_listener"):
             def notify_saved_briefing(name: str, path: str) -> None:
                 try:
-                    if "validation" in name: return
-                    json_path = Path(path); result = json.loads(json_path.read_text(encoding="utf-8"))
-                    if not isinstance(result, dict): return
-                    notification_service.submit(NotificationRequest(
-                        event_type=str(result.get("briefing_type")), trading_date=str(result.get("trading_date")),
-                        text=format_briefing(result), markdown_path=str(json_path.with_suffix(".md")), json_path=str(json_path),
-                    ))
+                    enqueue_saved_briefing(notification_service, name, path)
                 except Exception:
                     logging.getLogger(__name__).exception("notification enqueue failed; briefing remains complete")
             pipeline.add_completion_listener(notify_saved_briefing)
