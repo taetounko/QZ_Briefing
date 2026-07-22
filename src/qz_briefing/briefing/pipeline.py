@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import copy
 from collections.abc import Callable, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 from .collectors import BriefingCollector
 from .analysis import analyze_briefing
@@ -39,7 +39,7 @@ class DailyBriefingPipeline:
         self._storage = storage
         self._collectors = tuple(collectors)
         self._clock = clock
-        self._in_progress: set[tuple[date, BriefingType]] = set()
+        self._in_progress: set[tuple[date, BriefingType, bool]] = set()
         self._completed: set[tuple[date, BriefingType]] = set()
 
     def run(
@@ -50,21 +50,21 @@ class DailyBriefingPipeline:
         market_calendar_status: str,
         market_calendar_reason: str,
         market_calendar_warning: str | None = None,
+        manual_validation: bool = False,
     ) -> BriefingRunResult:
         key = (trading_date, briefing_type)
-        if key in self._in_progress or key in self._completed:
+        progress_key = (trading_date, briefing_type, manual_validation)
+        if progress_key in self._in_progress or (not manual_validation and key in self._completed):
             print(f"briefing already completed: {briefing_type.value}", flush=True)
             return BriefingRunResult("skipped", briefing_type, trading_date)
 
-        completed, existing_warning = self._validate_existing_result(
-            trading_date, briefing_type
-        )
+        completed, existing_warning = (False, None) if manual_validation else self._validate_existing_result(trading_date, briefing_type)
         if completed:
             self._completed.add(key)
             print(f"briefing already completed: {briefing_type.value}", flush=True)
             return BriefingRunResult("skipped", briefing_type, trading_date)
 
-        self._in_progress.add(key)
+        self._in_progress.add(progress_key)
         try:
             requested_at = self._clock()
             context = BriefingContext(
@@ -80,8 +80,13 @@ class DailyBriefingPipeline:
                 context.warnings.append(market_calendar_warning)
             if existing_warning:
                 context.warnings.append(existing_warning)
+            if manual_validation and context.started_at.time() < time(15, 40):
+                context.warnings.append(
+                    "장 종료 전 수동 검증 결과이며 실제 장마감 데이터가 아닙니다."
+                )
 
-            print(f"briefing pipeline started: {briefing_type.value}", flush=True)
+            log_name = f"{briefing_type.value} validation" if manual_validation else briefing_type.value
+            print(f"briefing pipeline started: {log_name}", flush=True)
             prior_pre_market = self._load_pre_market(context)
             collector_results: dict[str, dict[str, object]] = {}
             for collector in self._collectors:
@@ -207,6 +212,11 @@ class DailyBriefingPipeline:
                     "generated_at": context.completed_at.isoformat(),
                     "basis": "market_close",
                 }
+                if manual_validation:
+                    result["metadata"].update({
+                        "execution_mode": "manual_validation",
+                        "basis": "current_market_snapshot",
+                    })
                 result["previous_results"] = {
                     "pre_market_loaded": pre_market_source is not None,
                     "intraday_10am_loaded": intraday_source is not None,
@@ -224,12 +234,14 @@ class DailyBriefingPipeline:
                 result["previous_market_close"] = previous_close
                 if warning:
                     context.warnings.append(warning)
-            json_path, markdown_path = self._storage.save(
+            save = self._storage.save_validation if manual_validation else self._storage.save
+            json_path, markdown_path = save(
                 trading_date, briefing_type, result, render_markdown(result)
             )
-            self._completed.add(key)
+            if not manual_validation:
+                self._completed.add(key)
             print(f"briefing result saved: {json_path}", flush=True)
-            print(f"briefing pipeline completed: {briefing_type.value}", flush=True)
+            print(f"briefing pipeline completed: {log_name}", flush=True)
             return BriefingRunResult(
                 status,
                 briefing_type,
@@ -238,7 +250,7 @@ class DailyBriefingPipeline:
                 str(markdown_path),
             )
         finally:
-            self._in_progress.discard(key)
+            self._in_progress.discard(progress_key)
 
     def _load_same_day_result(
         self, context: BriefingContext, briefing_type: BriefingType, label: str

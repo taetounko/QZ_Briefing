@@ -109,3 +109,32 @@ def test_pre_market_links_latest_close_and_marks_stale(tmp_path: Path) -> None:
     assert saved["previous_market_close"]["trading_date"] == old.isoformat()
     assert any("stale" in warning for warning in saved["warnings"])
     assert "전 거래일 장마감 요약" in markdown
+
+
+def test_manual_validation_uses_dedicated_atomic_files_and_preserves_regular_result(tmp_path: Path) -> None:
+    storage = BriefingStorage(tmp_path)
+    regular = {"schema_version": 1, "briefing_type": "market_close", "trading_date": DAY.isoformat(), "status": "completed", "marker": "regular"}
+    regular_json, regular_md = storage.save(DAY, BriefingType.MARKET_CLOSE, regular, "regular markdown")
+    pipeline = DailyBriefingPipeline(storage, [], clock=lambda: datetime(2026, 7, 22, 14, 0))
+    run = pipeline.run(BriefingType.MARKET_CLOSE, DAY, market_calendar_status="open", market_calendar_reason="weekday", manual_validation=True)
+    validation = json.loads(Path(run.json_path).read_text(encoding="utf-8"))
+    assert Path(run.json_path).name == "market_close_validation.json"
+    assert Path(run.markdown_path).name == "market_close_validation.md"
+    assert validation["metadata"]["execution_mode"] == "manual_validation"
+    assert validation["metadata"]["basis"] == "current_market_snapshot"
+    assert "장 종료 전 수동 검증 결과이며 실제 장마감 데이터가 아닙니다." in validation["warnings"]
+    assert json.loads(regular_json.read_text(encoding="utf-8"))["marker"] == "regular"
+    assert regular_md.read_text(encoding="utf-8") == "regular markdown"
+    assert pipeline.run(BriefingType.MARKET_CLOSE, DAY, market_calendar_status="open", market_calendar_reason="weekday").status == "skipped"
+    latest, _ = storage.load_recent_market_close(date(2026, 7, 23))
+    assert latest["marker"] == "regular"
+
+
+def test_manual_validation_can_safely_replace_previous_validation(tmp_path: Path) -> None:
+    storage = BriefingStorage(tmp_path)
+    pipeline = DailyBriefingPipeline(storage, [], clock=lambda: datetime(2026, 7, 22, 16, 0))
+    first = pipeline.run(BriefingType.MARKET_CLOSE, DAY, market_calendar_status="open", market_calendar_reason="weekday", manual_validation=True)
+    first_text = Path(first.json_path).read_text(encoding="utf-8")
+    second = pipeline.run(BriefingType.MARKET_CLOSE, DAY, market_calendar_status="open", market_calendar_reason="weekday", manual_validation=True)
+    assert second.status == "completed"
+    assert Path(second.json_path).read_text(encoding="utf-8") == first_text

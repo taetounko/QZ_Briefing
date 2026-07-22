@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import argparse
 from collections.abc import Callable, Sequence
 from datetime import date, datetime
 from pathlib import Path
@@ -82,6 +83,21 @@ BriefingPipelineFactory = Callable[
     [LocalClock, KiwoomTrRequestQueue], DailyBriefingPipeline
 ]
 TrQueueFactory = Callable[[KiwoomQAxAdapter], KiwoomTrRequestQueue]
+
+
+def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespace:
+    """Parse CLI options before creating QApplication or the Kiwoom OCX."""
+    raw = list(sys.argv[1:] if arguments is None else arguments)
+    if raw and not raw[0].startswith("-"):
+        raw = raw[1:]
+    parser = argparse.ArgumentParser(prog="python -m qz_briefing")
+    parser.add_argument(
+        "--run-now",
+        choices=(BriefingType.MARKET_CLOSE.value,),
+        dest="run_now",
+        help="run one briefing immediately after Kiwoom login",
+    )
+    return parser.parse_args(raw)
 
 
 def check_market_day(target_date: date) -> TradingDayResult:
@@ -251,6 +267,10 @@ def run(
     clock: LocalClock = datetime.now,
 ) -> int:
     """Assemble the connection runtime and keep the Qt event loop running."""
+    options = parse_cli_arguments(arguments)
+    manual_market_close = options.run_now == BriefingType.MARKET_CLOSE.value
+    if manual_market_close:
+        print("manual briefing requested: market_close", flush=True)
     process_lock = lock_factory()
     if not acquire_process_lock(process_lock):
         print("QZ BRIEFING ALREADY RUNNING", flush=True)
@@ -316,8 +336,7 @@ def run(
                 ),
             )
 
-        briefing_scheduler = briefing_scheduler_factory(
-            {
+        callbacks = {
                 BriefingType.PRE_MARKET.value: lambda: run_briefing(
                     BriefingType.PRE_MARKET
                 ),
@@ -328,9 +347,11 @@ def run(
                     BriefingType.MARKET_CLOSE
                 ),
             }
-        )
+        if not manual_market_close:
+            briefing_scheduler = briefing_scheduler_factory(callbacks)
         shutdown_controller.attach_briefing_scheduler(dispatcher)
-        shutdown_controller.attach_briefing_scheduler(briefing_scheduler)
+        if briefing_scheduler is not None:
+            shutdown_controller.attach_briefing_scheduler(briefing_scheduler)
         reporter = ConsoleConnectionReporter(
             manager,
             adapter,
@@ -341,7 +362,28 @@ def run(
         if not runtime.start():
             raise RuntimeError("Kiwoom connection runtime did not start")
         print("RUNTIME STARTED", flush=True)
-        briefing_scheduler.schedule(now)
+        if manual_market_close:
+            def execute_validation() -> None:
+                try:
+                    pipeline.run(
+                        BriefingType.MARKET_CLOSE,
+                        now.date(),
+                        market_calendar_status=trading_day.status.value,
+                        market_calendar_reason=trading_day.reason,
+                        market_calendar_warning=trading_day.warning,
+                        manual_validation=True,
+                    )
+                finally:
+                    print("manual validation completed; shutting down", flush=True)
+                    shutdown_controller.request_shutdown(
+                        "manual validation shutdown requested"
+                    )
+
+            dispatcher.dispatch(
+                now.date(), BriefingType.MARKET_CLOSE, execute_validation
+            )
+        else:
+            briefing_scheduler.schedule(now)
         return int(application.exec_())
     finally:
         if runtime is None and adapter is not None:

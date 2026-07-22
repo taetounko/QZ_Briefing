@@ -20,6 +20,7 @@ from qz_briefing.__main__ import (  # noqa: E402
     ConsoleConnectionReporter,
     acquire_process_lock,
     main,
+    parse_cli_arguments,
     run as application_run,
 )
 from qz_briefing.kiwoom import (  # noqa: E402
@@ -27,6 +28,7 @@ from qz_briefing.kiwoom import (  # noqa: E402
     ConnectionState,
     KiwoomConnectionManager,
 )
+from qz_briefing.briefing import BriefingType  # noqa: E402
 from qz_briefing.scheduling import MarketStatus, TradingDayResult  # noqa: E402
 
 
@@ -224,6 +226,48 @@ class FakeConnection:
 
 
 class MainEntryPointTests(unittest.TestCase):
+    def test_manual_market_close_argument_parsing_and_invalid_value(self) -> None:
+        self.assertEqual(
+            parse_cli_arguments(["--run-now", "market_close"]).run_now,
+            "market_close",
+        )
+        self.assertIsNone(parse_cli_arguments([]).run_now)
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:
+            parse_cli_arguments(["--run-now", "invalid"])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_manual_market_close_runs_after_connected_start_and_shuts_down(self) -> None:
+        events: list[str] = []
+        pipeline = FakeBriefingPipeline()
+        controllers: list[FakeShutdownController] = []
+
+        def controller_factory(app, lock):
+            controller = FakeShutdownController(app, lock)
+            controllers.append(controller)
+            return controller
+
+        def unexpected_scheduler(callbacks):
+            raise AssertionError("manual mode must not create the regular scheduler")
+
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            exit_code = run(
+                ["--run-now", "market_close"],
+                application_factory=lambda arguments: FakeApplication(events),
+                adapter_factory=FakeAdapter,  # type: ignore[arg-type]
+                manager_factory=lambda adapter: FakeManager(),  # type: ignore[arg-type]
+                runtime_factory=lambda *args, **kwargs: FakeRuntime(events),
+                lock_factory=FakeProcessLock,
+                shutdown_controller_factory=controller_factory,
+                briefing_scheduler_factory=unexpected_scheduler,
+                briefing_pipeline_factory=lambda clock, queue: pipeline,
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(pipeline.calls[0][0], BriefingType.MARKET_CLOSE)
+        self.assertTrue(pipeline.calls[0][2]["manual_validation"])
+        self.assertTrue(controllers[0].stopped)
+        self.assertIn("manual validation completed; shutting down", output.getvalue())
+
     def test_scheduler_callback_invokes_shared_briefing_pipeline(self) -> None:
         events: list[str] = []
         pipeline = FakeBriefingPipeline()

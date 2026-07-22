@@ -29,6 +29,15 @@ class BriefingStorage:
             directory / f"{briefing_type.value}.md",
         )
 
+    def validation_paths(
+        self, trading_date: date, briefing_type: BriefingType
+    ) -> tuple[Path, Path]:
+        json_path, markdown_path = self.result_paths(trading_date, briefing_type)
+        return (
+            json_path.with_name(f"{briefing_type.value}_validation.json"),
+            markdown_path.with_name(f"{briefing_type.value}_validation.md"),
+        )
+
     def load_json(
         self, trading_date: date, briefing_type: BriefingType
     ) -> dict[str, object] | None:
@@ -100,7 +109,25 @@ class BriefingStorage:
         result: dict[str, object],
         markdown: str,
     ) -> tuple[Path, Path]:
-        json_path, markdown_path = self.result_paths(trading_date, briefing_type)
+        return self._save_paths(
+            *self.result_paths(trading_date, briefing_type), result, markdown
+        )
+
+    def save_validation(
+        self,
+        trading_date: date,
+        briefing_type: BriefingType,
+        result: dict[str, object],
+        markdown: str,
+    ) -> tuple[Path, Path]:
+        return self._save_paths(
+            *self.validation_paths(trading_date, briefing_type), result, markdown
+        )
+
+    def _save_paths(
+        self, json_path: Path, markdown_path: Path,
+        result: dict[str, object], markdown: str,
+    ) -> tuple[Path, Path]:
         json_text = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
         json_path.parent.mkdir(parents=True, exist_ok=True)
         temporary_json: Path | None = None
