@@ -62,10 +62,16 @@ class DashboardViewModel:
     @staticmethod
     def summary(result: dict[str, object]) -> dict[str, object]:
         analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else {}
+        decision = analysis.get("decision") if isinstance(analysis.get("decision"), dict) else {}
         close = result.get("market_close_analysis") if isinstance(result.get("market_close_analysis"), dict) else {}
         indices, stocks, flows, derivatives = index_rates(result), stock_rates(result), spot_flows(result), derivatives_values(result)
         return {
-            "conclusion": close.get("market_conclusion") or analysis.get("summary") or "아직 완료된 브리핑이 없습니다",
+            "conclusion": decision.get("headline") or close.get("market_conclusion") or analysis.get("summary") or "아직 완료된 브리핑이 없습니다",
+            "decision_confidence": decision.get("confidence"),
+            "market_risk": decision.get("risk_level"),
+            "action_guidance": decision.get("action_guidance"),
+            "confirmation_conditions": decision.get("confirmation_conditions", []),
+            "invalidation_conditions": decision.get("invalidation_conditions", []),
             "KOSPI": indices.get("KOSPI"), "KOSDAQ": indices.get("KOSDAQ"), "KOSPI200": indices.get("KOSPI200"),
             "삼성전자": stocks.get("005930"), "SK하이닉스": stocks.get("000660"),
             "외국인": flows.get("foreigner"), "기관": flows.get("institution"),
@@ -85,6 +91,7 @@ class DashboardViewModel:
             account_ids = item.get("account_ids") if isinstance(item.get("account_ids"), list) else []
             projected = {key: value for key, value in item.items() if key != "account_ids"}
             rows.append({**projected, "account": ", ".join(mask_account(value) for value in account_ids) or "-"})
+        rows.sort(key=lambda item: (item.get("priority", 8), str(item.get("code", ""))))
         return {"account_count": len(accounts), "holding_count": len(rows), "source": data.get("source", "-"), "portfolio": portfolio, "rows": rows}
 
     @staticmethod

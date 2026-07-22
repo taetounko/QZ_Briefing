@@ -17,6 +17,7 @@ from .technical_indicators import macd_12_26_9, rsi14
 from .accounts import (
     KiwoomAccountHoldingsSource, consolidate, mask_account, normalize_account_row,
 )
+from .decision_guidance import holding_decision, priority
 
 ALLOWED_FIELDS = {
     "code", "name", "quantity", "average_price", "target_price", "stop_price",
@@ -187,6 +188,8 @@ class HoldingsCollector:
             item["trend"] = item["bottom_confirmation"] = item["review_status"] = "insufficient_data"
             item["warnings"].append(f"일봉 분석 실패: {type(exc).__name__}: {exc}")
         item["next_session_observation"] = next_session_observation(item)
+        item["decision"] = holding_decision(item)
+        item["priority"] = priority(item["decision"])
         return item
 
 

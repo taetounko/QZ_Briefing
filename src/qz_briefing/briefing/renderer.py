@@ -9,18 +9,59 @@ from .rules import derivatives_values, index_rates, spot_flows, stock_rates
 def render_markdown(result: dict[str, object]) -> str:
     analysis = result.get("analysis", {})
     comments = analysis.get("indicator_comments", {}) if isinstance(analysis, dict) else {}
+    decision = analysis.get("decision", {}) if isinstance(analysis, dict) and isinstance(analysis.get("decision"), dict) else {}
+    holdings = result.get("holdings_analysis") if isinstance(result.get("holdings_analysis"), dict) else {}
     lines = [
         "# QZ 한국 시장 브리핑", "",
         f"- 거래일: {result['trading_date']}",
         f"- 브리핑 종류: {result['briefing_type']}",
         f"- Briefing type: {result['briefing_type']}",
         f"- 생성 상태: {result['status']}", "",
+        "## 오늘의 결론", "",
+        f"- 시장 상태: {decision.get('headline', analysis.get('summary', '분석 데이터가 없습니다.'))}",
+        f"- 판단 신뢰도: {decision.get('confidence', 0)}/100",
+        f"- 시장 위험 수준: {decision.get('risk_level', 'unknown')}",
+        f"- 행동지침: {decision.get('action_guidance', '관찰을 우선합니다.')}",
+        f"- 핵심 확인 조건: {', '.join(decision.get('confirmation_conditions', [])) or '자료 확보'}",
+        f"- 핵심 위험 조건: {', '.join(decision.get('invalidation_conditions', [])) or '자료 부족'}", "",
+        "## 보유종목 긴급 확인", "",
+    ]
+    urgent = sorted(
+        [item for item in holdings.get("holdings", []) if isinstance(item, dict)],
+        key=lambda item: item.get("priority", 8),
+    )[:5]
+    if urgent:
+        for item in urgent:
+            item_decision = item.get("decision", {}) if isinstance(item.get("decision"), dict) else {}
+            lines.append(
+                f"- {item.get('name')}({item.get('code')}): {item_decision.get('summary', '자료 부족')} "
+                f"/ 다음 확인: {item_decision.get('next_check', '자료 확보')} "
+                f"/ 행동: {item_decision.get('action_level', 'insufficient_data')}"
+            )
+    else:
+        lines.append("- 긴급 확인 대상이 없습니다.")
+    lines.extend(["", "## 오늘의 관찰 종목", ""])
+    leadership = result.get("leadership") if isinstance(result.get("leadership"), dict) else {}
+    observations = []
+    for key in ("kospi", "kosdaq", "rebound_candidates"):
+        for item in leadership.get(key, []):
+            if isinstance(item, dict) and item.get("code") not in {row.get("code") for row in observations}:
+                observations.append(item)
+    for item in observations[:5]:
+        lines.append(
+            f"- {item.get('name')}({item.get('code')}): {', '.join(item.get('reasons', [])) or '선정 자료 부족'} "
+            f"/ 확인: 거래대금과 추세 유지 / 무효: {', '.join(item.get('warnings', [])) or '선정 기준 이탈'}"
+        )
+    if not observations:
+        lines.append("- 선정 기준을 통과한 관찰 종목이 없습니다.")
+    lines.extend([
+        "- 선정 결과는 매수 신호가 아닙니다.", "",
         "## 한눈에 보는 시장 판단", "",
         str(analysis.get("summary", "분석 데이터가 없습니다.")),
         f"- 상태: `{analysis.get('market_state', 'insufficient_data')}`",
         f"- 신뢰도: `{analysis.get('confidence', 'low')}`", "",
         "## 핵심 수치", "",
-    ]
+    ])
     lines.extend(core_number_lines(result))
     sections = (
         ("시장 지수 해석", "market_indices"),
@@ -153,6 +194,7 @@ def render_holdings(value: object) -> list[str]:
             f"- 전체 수익률: {percent(portfolio.get('profit_rate'))}",
         ])
     for item in data.get("holdings", []):
+        decision = item.get("decision", {}) if isinstance(item.get("decision"), dict) else {}
         lines.extend([
             "", f"### {item.get('name') or '종목명 없음'} ({item.get('code')})", "",
             f"- 수량 {item.get('quantity'):,}주 / 평단 {item.get('average_price'):,.2f}원 / 현재가 {item.get('current_price'):,}원",
@@ -161,6 +203,11 @@ def render_holdings(value: object) -> list[str]:
             f"- 기술적 위치: 5일선 {optional_number(item.get('moving_averages', {}).get('ma5'))}, 20일선 {optional_number(item.get('moving_averages', {}).get('ma20'))}, 60일선 {optional_number(item.get('moving_averages', {}).get('ma60'))}",
             f"- 바닥 확인 상태: `{item.get('bottom_confirmation')}`",
             f"- 물타기·불타기·축소 검토: `{item.get('review_status')}`",
+            f"- 판단 요약: {decision.get('summary', '자료 부족')}",
+            f"- 판단 신뢰도: {decision.get('confidence', 0)}/100 / 행동 수준: `{decision.get('action_level', 'insufficient_data')}`",
+            f"- 확인 조건: {', '.join(decision.get('positive_conditions', [])) or '추가 자료 확인'}",
+            f"- 위험 조건: {', '.join(decision.get('risk_conditions', [])) or '명시된 위험 조건 없음'}",
+            f"- 가격 조건: {decision.get('price_conditions', {})}",
             "- 주의: 수수료와 세금은 반영하지 않았으며 확정적인 매수·매도 지시가 아닙니다.",
         ])
     comparison = data.get("comparison_with_pre_market")

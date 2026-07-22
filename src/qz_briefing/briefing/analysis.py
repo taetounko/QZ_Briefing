@@ -7,6 +7,7 @@ from .rules import (
     calculate_signals, derivatives_values, index_rates, score_market, spot_flows,
     stock_rates,
 )
+from .decision_guidance import market_decision
 
 STATE_LABELS = {
     "strong_bullish": "강한 상승 우위",
@@ -39,7 +40,7 @@ def analyze_briefing(
             confidence = "medium"
     comparison = compare_with_pre_market(result, pre_market)
     warnings.extend(comparison.pop("warnings", []))
-    return {
+    analysis = {
         "market_state": state,
         "score": score,
         "confidence": confidence,
@@ -50,6 +51,8 @@ def analyze_briefing(
         "comparison_with_pre_market": comparison,
         "warnings": warnings,
     }
+    analysis["decision"] = market_decision(result)
+    return analysis
 
 
 def build_comments(result: dict[str, object]) -> dict[str, str]:

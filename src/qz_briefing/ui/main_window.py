@@ -20,7 +20,7 @@ from .formatters import money, number, percent, status_label
 from .tray_controller import TrayController
 
 
-HOLDING_COLUMNS = ("종목코드", "종목명", "마스킹 계좌", "수량", "평단", "현재가", "투자금액", "평가금액", "평가손익", "수익률", "추세", "바닥 확인", "포지션 검토", "경고")
+HOLDING_COLUMNS = ("우선순위", "종목코드", "종목명", "마스킹 계좌", "수량", "평단", "현재가", "투자금액", "평가금액", "평가손익", "수익률", "추세", "바닥 확인", "포지션 검토", "판단 신뢰도", "행동 수준", "핵심 이유", "확인 조건", "위험 조건", "경고")
 LEADERSHIP_COLUMNS = ("시장", "종목코드", "종목명", "현재가", "등락률", "거래대금", "RSI", "MACD", "추세", "선정 이유", "주의사항")
 WATCH_COLUMNS = ("분류", "종목 또는 지표", "현재 상태", "확인 조건", "위험 조건")
 
@@ -46,6 +46,7 @@ class DashboardMainWindow(QMainWindow):
         self._tabs = QTabWidget(); self._result_views = {}
         self._summary = QTextBrowser(); self._holdings = self._table(HOLDING_COLUMNS)
         self._holdings_summary = QLabel()
+        self._holding_detail = QTextBrowser()
         self._leadership = self._table(LEADERSHIP_COLUMNS); self._watchlist = self._table(WATCH_COLUMNS)
         self._messages = QTextBrowser()
         self._build_ui()
@@ -70,6 +71,8 @@ class DashboardMainWindow(QMainWindow):
             view = QTextBrowser(); self._result_views[key] = view; self._tabs.addTab(view, title)
         holdings_tab = QWidget(); holdings_layout = QVBoxLayout(holdings_tab)
         holdings_layout.addWidget(self._holdings_summary); holdings_layout.addWidget(self._holdings)
+        holdings_layout.addWidget(self._holding_detail)
+        self._holdings.itemSelectionChanged.connect(self._show_holding_detail)
         self._tabs.addTab(holdings_tab, "보유종목"); self._tabs.addTab(self._leadership, "주도주·반등 후보")
         self._tabs.addTab(self._watchlist, "다음 거래일 관찰목록"); self._tabs.addTab(self._messages, "오류·경고")
         layout.addWidget(self._tabs)
@@ -109,11 +112,20 @@ class DashboardMainWindow(QMainWindow):
     def _populate_holdings(self, data: dict[str, object]) -> None:
         rows = data.get("rows", []); self._holdings.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
-            values = (row.get("code"), row.get("name"), row.get("account"), number(row.get("quantity")), money(row.get("average_price")), money(row.get("current_price")), money(row.get("investment_amount")), money(row.get("valuation_amount")), money(row.get("profit_loss")), percent(row.get("profit_rate")), status_label(row.get("trend")), status_label(row.get("bottom_confirmation")), status_label(row.get("review_status")), "; ".join(row.get("warnings", [])))
-            for column, value in enumerate(values): self._holdings.setItem(row_index, column, QTableWidgetItem(str(value or "-")))
+            decision = row.get("decision") if isinstance(row.get("decision"), dict) else {}
+            values = (row.get("priority"), row.get("code"), row.get("name"), row.get("account"), number(row.get("quantity")), money(row.get("average_price")), money(row.get("current_price")), money(row.get("investment_amount")), money(row.get("valuation_amount")), money(row.get("profit_loss")), percent(row.get("profit_rate")), status_label(row.get("trend")), status_label(row.get("bottom_confirmation")), status_label(row.get("review_status")), decision.get("confidence"), status_label(decision.get("action_level")), decision.get("summary"), "; ".join(decision.get("positive_conditions", [])), "; ".join(decision.get("risk_conditions", [])), "; ".join(row.get("warnings", [])))
+            for column, value in enumerate(values):
+                cell = QTableWidgetItem(str(value or "-")); cell.setToolTip(str(value or "-")); self._holdings.setItem(row_index, column, cell)
         portfolio = data.get("portfolio", {})
         summary = f"계좌 {data.get('account_count', 0)} / 종목 {data.get('holding_count', 0)} / 총 투자금액 {money(portfolio.get('investment_amount'))} / 총 평가금액 {money(portfolio.get('valuation_amount'))} / 총 평가손익 {money(portfolio.get('profit_loss'))} / 전체 수익률 {percent(portfolio.get('profit_rate'))} / 출처 {data.get('source')}"
         self._holdings_summary.setText(summary); self._holdings.setToolTip(summary)
+
+    def _show_holding_detail(self) -> None:
+        row = self._holdings.currentRow()
+        if row < 0:
+            self._holding_detail.clear(); return
+        values = [self._holdings.item(row, column).text() if self._holdings.item(row, column) else "-" for column in range(self._holdings.columnCount())]
+        self._holding_detail.setPlainText("\n".join(f"{HOLDING_COLUMNS[index]}: {value}" for index, value in enumerate(values)))
 
     def _populate_leadership(self, rows) -> None:
         self._leadership.setRowCount(len(rows))

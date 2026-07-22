@@ -21,6 +21,7 @@ from .models import (
     BriefingType,
 )
 from .renderer import render_markdown
+from .decision_guidance import holding_decision, market_decision, priority
 from .storage import BriefingStorage
 
 
@@ -199,7 +200,7 @@ class DailyBriefingPipeline:
                     context, BriefingType.INTRADAY_10AM, "intraday"
                 )
             result["analysis"] = (
-                {"market_state": "insufficient_data", "summary": result["message"], "warnings": list(context.warnings)}
+                {"market_state": "market_not_open", "summary": result["message"], "warnings": list(context.warnings), "decision": market_decision(result)}
                 if no_market_open else analyze_briefing(result, intraday_source or pre_market_source)
             )
             leadership_result = collector_results.get("kiwoom_market_leadership")
@@ -237,6 +238,14 @@ class DailyBriefingPipeline:
                 holdings_result.get("data"), dict
             ):
                 result["holdings_analysis"] = holdings_result["data"]
+                market_decision = result["analysis"].get("decision", {})
+                for item in result["holdings_analysis"].get("holdings", []):
+                    if isinstance(item, dict):
+                        item["decision"] = holding_decision(item, market_decision)
+                        item["priority"] = priority(item["decision"])
+                result["holdings_analysis"]["holdings"].sort(
+                    key=lambda item: (item.get("priority", 8), str(item.get("code", "")))
+                )
                 if pre_market_source and isinstance(
                     pre_market_source.get("holdings_analysis"), dict
                 ):

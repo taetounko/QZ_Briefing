@@ -17,6 +17,10 @@ STATUS_LABELS = {
     "reduce_position_review": "비중 축소 검토", "reduce_risk": "비중 축소 검토",
     "exit_review": "탈출 검토", "wait": "대기", "no_action": "관망",
     "insufficient_data": "자료 부족",
+    "do_not_add": "추가매수 금지", "observe_only": "관찰만",
+    "conditional_add_review": "조건 충족 시 추가매수 검토",
+    "hold_and_monitor": "보유하며 관찰", "protect_profit": "수익 보호",
+    "reduce_risk": "위험 축소 검토", "exit_condition_check": "이탈 조건 확인",
 }
 
 
