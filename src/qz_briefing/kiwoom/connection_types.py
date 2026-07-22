@@ -13,8 +13,11 @@ class ConnectionState(Enum):
     DISCONNECTED = auto()
     CONNECTING = auto()
     CONNECTED = auto()
+    RECHECKING = auto()
     RECONNECT_WAIT = auto()
+    RECONNECTING = auto()
     FAILED = auto()
+    SHUTTING_DOWN = auto()
     STOPPED = auto()
 
 
@@ -23,8 +26,10 @@ class ConnectionConfig:
     """Timing and retry limits for connection monitoring."""
 
     check_interval_seconds: float = 30
-    reconnect_delay_seconds: float = 60
-    max_reconnect_attempts: int = 3
+    reconnect_delay_seconds: float = 10
+    reconnect_backoff_seconds: tuple[float, ...] = (10, 30, 60, 60, 60)
+    recheck_delays_seconds: tuple[float, ...] = (2, 5)
+    max_reconnect_attempts: int = 5
     login_timeout_seconds: float = 300
 
     def __post_init__(self) -> None:
@@ -36,6 +41,10 @@ class ConnectionConfig:
             raise ValueError("max_reconnect_attempts must be at least 1")
         if self.login_timeout_seconds <= 0:
             raise ValueError("login_timeout_seconds must be positive")
+        if not self.reconnect_backoff_seconds or any(value < 0 for value in self.reconnect_backoff_seconds):
+            raise ValueError("reconnect_backoff_seconds must be non-negative")
+        if len(self.recheck_delays_seconds) != 2 or any(value < 0 for value in self.recheck_delays_seconds):
+            raise ValueError("recheck_delays_seconds must contain two non-negative delays")
 
 
 @runtime_checkable

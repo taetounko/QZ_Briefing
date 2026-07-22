@@ -323,6 +323,12 @@ def run(
         print("KIWOOM OCX READY", flush=True)
         manager = manager_factory(adapter)
         tr_queue = tr_queue_factory(adapter)
+        if hasattr(tr_queue, "set_timeout_observer"):
+            def observe_tr_timeout(count: int) -> None:
+                if count < 2: return
+                if hasattr(tr_queue, "pause"): tr_queue.pause("consecutive TR timeouts detected")
+                manager.request_connection_recheck("consecutive TR timeouts detected")
+            tr_queue.set_timeout_observer(observe_tr_timeout)
         shutdown_controller.attach_briefing_scheduler(tr_queue)
         pipeline = briefing_pipeline_factory(clock, tr_queue)
         dispatcher = ConnectionAwareBriefingDispatcher(
@@ -385,10 +391,19 @@ def run(
         shutdown_controller.attach_briefing_scheduler(dispatcher)
         if briefing_scheduler is not None:
             shutdown_controller.attach_briefing_scheduler(briefing_scheduler)
+        def report_connection_state(state: ConnectionState) -> None:
+            if state is ConnectionState.CONNECTED and hasattr(tr_queue, "resume"):
+                tr_queue.resume()
+            elif state in {ConnectionState.RECHECKING, ConnectionState.RECONNECT_WAIT, ConnectionState.RECONNECTING, ConnectionState.FAILED} and hasattr(tr_queue, "pause"):
+                tr_queue.pause(f"connection recovery state: {state.name}")
+            dispatcher.on_connection_state(state)
+            if dashboard is not None and hasattr(dashboard, "handle_connection_state"):
+                dashboard.handle_connection_state(state)
+
         reporter = ConsoleConnectionReporter(
             manager,
             adapter,
-            on_connection_state=dispatcher.on_connection_state,
+            on_connection_state=report_connection_state,
         )
         runtime = runtime_factory(adapter, manager, on_state_change=reporter)
         shutdown_controller.attach_runtime(runtime)
@@ -413,7 +428,8 @@ def run(
                     )
 
             dispatcher.dispatch(
-                now.date(), BriefingType.MARKET_CLOSE, execute_validation
+                now.date(), BriefingType.MARKET_CLOSE, execute_validation,
+                recoverable=False,
             )
         else:
             briefing_scheduler.schedule(now)
@@ -434,8 +450,8 @@ def main() -> int:
     try:
         return run()
     except KeyboardInterrupt:
-        print("INTERRUPTED", file=sys.stderr, flush=True)
-        return 130
+        print("shutdown requested by user", flush=True)
+        return 0
     except Exception as exc:
         print(
             f"STARTUP FAILED: {type(exc).__name__}: {exc}",

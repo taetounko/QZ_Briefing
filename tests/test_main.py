@@ -412,12 +412,12 @@ class MainEntryPointTests(unittest.TestCase):
             self.assertEqual(main(), 1)
         self.assertIn("STARTUP FAILED: RuntimeError: failed", error.getvalue())
 
-    def test_main_returns_130_for_keyboard_interrupt(self) -> None:
+    def test_main_treats_keyboard_interrupt_as_clean_user_shutdown(self) -> None:
         with (
             patch("qz_briefing.__main__.run", side_effect=KeyboardInterrupt),
-            contextlib.redirect_stderr(io.StringIO()),
+            contextlib.redirect_stdout(io.StringIO()),
         ):
-            self.assertEqual(main(), 130)
+            self.assertEqual(main(), 0)
 
     def test_run_assembles_components_starts_runtime_and_enters_event_loop(self) -> None:
         events: list[str] = []
@@ -614,7 +614,7 @@ class MainEntryPointTests(unittest.TestCase):
             ConsoleConnectionReporter(failure_manager)(object())  # type: ignore[arg-type]
 
         self.assertIn("LOGIN SUCCESS", output.getvalue())
-        self.assertIn("LOGIN FAILED", output.getvalue())
+        self.assertIn("RECONNECT_WAIT", output.getvalue())
 
     def test_reporter_logs_adapter_diagnostics(self) -> None:
         connection = FakeConnection(0)

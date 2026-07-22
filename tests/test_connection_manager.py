@@ -53,6 +53,8 @@ class KiwoomConnectionManagerTests(unittest.TestCase):
         self.config = ConnectionConfig(
             check_interval_seconds=1,
             reconnect_delay_seconds=2,
+            reconnect_backoff_seconds=(2, 3, 4),
+            recheck_delays_seconds=(2, 5),
             max_reconnect_attempts=3,
             login_timeout_seconds=5,
         )
@@ -76,8 +78,9 @@ class KiwoomConnectionManagerTests(unittest.TestCase):
     def test_config_defaults(self) -> None:
         config = ConnectionConfig()
         self.assertEqual(config.check_interval_seconds, 30)
-        self.assertEqual(config.reconnect_delay_seconds, 60)
-        self.assertEqual(config.max_reconnect_attempts, 3)
+        self.assertEqual(config.reconnect_delay_seconds, 10)
+        self.assertEqual(config.reconnect_backoff_seconds, (10, 30, 60, 60, 60))
+        self.assertEqual(config.max_reconnect_attempts, 5)
         self.assertEqual(config.login_timeout_seconds, 300)
 
     def test_start_when_already_connected(self) -> None:
@@ -113,28 +116,28 @@ class KiwoomConnectionManagerTests(unittest.TestCase):
         self.assertEqual(manager.state, ConnectionState.CONNECTED)
         self.assertEqual(manager.reconnect_attempts, 0)
 
-    def test_login_error_fails_without_retry(self) -> None:
+    def test_login_error_schedules_limited_reconnect(self) -> None:
         connection = FakeKiwoomConnection(0)
         manager = self.make_manager(connection)
         manager.start()
         manager.handle_login_event(-101)
-        self.assertEqual(manager.state, ConnectionState.FAILED)
+        self.assertEqual(manager.state, ConnectionState.RECONNECT_WAIT)
         self.assertEqual(connection.request_count, 1)
         self.clock.advance(100)
         manager.tick()
-        self.assertEqual(connection.request_count, 1)
+        self.assertEqual(connection.request_count, 2)
 
     def test_connected_check_detects_disconnect(self) -> None:
         _, manager = self.disconnect_connected_manager()
-        self.assertEqual(manager.state, ConnectionState.FAILED)
+        self.assertEqual(manager.state, ConnectionState.RECONNECT_WAIT)
         self.assertEqual(manager.reconnect_attempts, 0)
 
-    def test_disconnect_never_requests_connection_again(self) -> None:
+    def test_disconnect_requests_one_reconnect_at_due_time(self) -> None:
         connection, manager = self.disconnect_connected_manager()
         self.clock.advance(100)
         manager.tick()
-        self.assertEqual(manager.state, ConnectionState.FAILED)
-        self.assertEqual(connection.request_count, 0)
+        self.assertEqual(manager.state, ConnectionState.RECONNECTING)
+        self.assertEqual(connection.request_count, 1)
 
     def test_login_success_cancels_response_timeout(self) -> None:
         connection = FakeKiwoomConnection(0)
@@ -148,27 +151,27 @@ class KiwoomConnectionManagerTests(unittest.TestCase):
         self.assertEqual(manager.reconnect_attempts, 0)
         self.assertEqual(connection.request_count, 1)
 
-    def test_login_response_timeout_fails_without_retry(self) -> None:
+    def test_login_response_timeout_schedules_reconnect(self) -> None:
         connection = FakeKiwoomConnection(0)
         manager = self.make_manager(connection)
         manager.start()
         self.clock.advance(5)
         manager.tick()
-        self.assertEqual(manager.state, ConnectionState.FAILED)
+        self.assertEqual(manager.state, ConnectionState.RECONNECT_WAIT)
         self.assertEqual(connection.request_count, 1)
         self.clock.advance(100)
         manager.tick()
-        self.assertEqual(connection.request_count, 1)
+        self.assertEqual(connection.request_count, 2)
 
-    def test_immediate_request_failure_fails_without_retry(self) -> None:
+    def test_immediate_request_failure_schedules_reconnect(self) -> None:
         connection = FakeKiwoomConnection(0)
         connection.request_results = [-1]
         manager = self.make_manager(connection)
         manager.start()
-        self.assertEqual(manager.state, ConnectionState.FAILED)
+        self.assertEqual(manager.state, ConnectionState.RECONNECT_WAIT)
         self.clock.advance(100)
         manager.tick()
-        self.assertEqual(connection.request_count, 1)
+        self.assertEqual(connection.request_count, 2)
 
     def test_stop_prevents_later_requests_and_events(self) -> None:
         connection = FakeKiwoomConnection(0)
@@ -193,9 +196,39 @@ class KiwoomConnectionManagerTests(unittest.TestCase):
         _, manager = self.disconnect_connected_manager()
         transition = manager.transitions[-1]
         self.assertEqual(transition.previous_state, ConnectionState.CONNECTED)
-        self.assertEqual(transition.new_state, ConnectionState.FAILED)
+        self.assertEqual(transition.new_state, ConnectionState.RECONNECT_WAIT)
         self.assertTrue(transition.reason)
         self.assertEqual(transition.reconnect_attempts, 0)
+
+    def test_negative_event_with_connected_state_is_debounced_twice(self) -> None:
+        connection = FakeKiwoomConnection(1); manager = self.make_manager(connection); manager.start()
+        manager.handle_login_event(-106)
+        self.assertEqual(manager.state, ConnectionState.RECHECKING)
+        self.clock.advance(2); manager.tick()
+        self.assertEqual(manager.state, ConnectionState.RECHECKING)
+        self.clock.advance(3); manager.tick()
+        self.assertEqual(manager.state, ConnectionState.CONNECTED)
+
+    def test_second_recheck_can_confirm_disconnect(self) -> None:
+        connection = FakeKiwoomConnection(1); manager = self.make_manager(connection); manager.start()
+        manager.handle_login_event(-106); self.clock.advance(2); manager.tick()
+        connection.connect_state = 0; self.clock.advance(3); manager.tick()
+        self.assertEqual(manager.state, ConnectionState.RECONNECT_WAIT)
+
+    def test_reconnect_backoff_and_exhaustion(self) -> None:
+        connection, manager = self.disconnect_connected_manager()
+        connection.request_results = [-1, -1, -1]
+        for delay in (2, 3, 4):
+            self.clock.advance(delay); manager.tick()
+        self.assertEqual(manager.state, ConnectionState.FAILED)
+        self.assertEqual(connection.request_count, 3)
+
+    def test_reconnect_success_resets_attempts(self) -> None:
+        connection, manager = self.disconnect_connected_manager()
+        self.clock.advance(2); manager.tick(); connection.connect_state = 1
+        manager.handle_login_event(0)
+        self.assertEqual(manager.state, ConnectionState.CONNECTED)
+        self.assertEqual(manager.reconnect_attempts, 0)
 
     def test_manager_does_not_accept_or_store_sensitive_information(self) -> None:
         parameters = set(inspect.signature(KiwoomConnectionManager).parameters)

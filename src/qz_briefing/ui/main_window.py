@@ -39,6 +39,8 @@ class DashboardMainWindow(QMainWindow):
         self._open_folder = open_folder or (lambda: os.startfile(str(self._root)))
         self._trading_day_status, self._background_notice_shown = trading_day_status, False
         self._view_model = DashboardViewModel(root, clock=clock)
+        self._runtime_messages: list[str] = []
+        self._file_messages: list[str] = []
         self.setWindowTitle("QZ Briefing 대시보드"); self.resize(1400, 850)
         self._status_labels = {name: QLabel() for name in ("connection", "calendar", "clock", "next", "last", "shutdown")}
         self._tabs = QTabWidget(); self._result_views = {}
@@ -99,7 +101,8 @@ class DashboardMainWindow(QMainWindow):
                     if isinstance(validation.get("json"), dict): text += "\n\n[수동 validation 결과 별도 존재]\n" + str(validation.get("markdown") or "")
                 view.setPlainText(text)
         self._populate_holdings(model["holdings"]); self._populate_leadership(model["leadership"]); self._populate_watchlist(model["watchlist"])
-        self._messages.setPlainText("\n".join(model["messages"]) or "오류·경고 없음")
+        self._file_messages = list(model["messages"])
+        self._messages.setPlainText("\n".join(self._file_messages + self._runtime_messages) or "오류·경고 없음")
         latest = model.get("latest", {}); self._status_labels["last"].setText(str(latest.get("briefing_type", "없음")) if isinstance(latest, dict) else "없음")
         self._update_status()
 
@@ -134,6 +137,21 @@ class DashboardMainWindow(QMainWindow):
         self._status_labels["shutdown"].setText("20:00")
 
     def show_dashboard(self) -> None: self.showNormal(); self.raise_(); self.activateWindow()
+
+    def handle_connection_state(self, state: object) -> None:
+        if not self._timer.isActive(): return
+        name = getattr(state, "name", str(state)); timestamp = self._clock().isoformat(timespec="seconds")
+        messages = {
+            "RECHECKING": "키움 연결 상태 불일치를 재확인합니다",
+            "RECONNECT_WAIT": "키움 연결이 끊어져 재연결을 시도합니다",
+            "RECONNECTING": "키움 연결 재시도 중입니다",
+            "CONNECTED": "키움 연결이 복구되었습니다",
+            "FAILED": "자동 복구에 실패했습니다. 프로그램 상태를 확인하세요",
+        }
+        if name in messages:
+            message = f"{timestamp} {messages[name]}"; self._runtime_messages.append(message)
+            self.tray.icon.showMessage("QZ Briefing", messages[name])
+        self._update_status(); self._messages.setPlainText("\n".join(self._file_messages + self._runtime_messages))
 
     def closeEvent(self, event) -> None:
         event.ignore(); self.hide()

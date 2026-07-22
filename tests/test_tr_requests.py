@@ -306,3 +306,54 @@ def test_shutdown_cancels_global_interval_timer() -> None:
     queue.close(); interval_timer.timeout.emit()
     assert interval_timer.stop_count >= 1
     assert [item[0] for item in adapter.requests] == ["first"] and len(errors) == 1
+
+
+def test_progress_diagnostics_and_two_timeouts_request_connection_recheck() -> None:
+    observed = []
+    queue, adapter, timers = make_queue()
+    queue.set_timeout_observer(observed.append)
+    queue.submit(request("first"), lambda data: None, lambda error: None)
+    assert queue.progress["active_request"] == "first"
+    assert queue.progress["last_request_started_at"] == 0.0
+    timers[-1].timeout.emit()
+    queue.submit(request("second"), lambda data: None, lambda error: None)
+    timers[-1].timeout.emit()
+    assert observed == [1, 2]
+    assert queue.progress["active_request"] is None
+    assert queue.progress["consecutive_timeouts"] == 2
+
+
+def test_success_resets_consecutive_timeout_count_and_late_response_is_ignored() -> None:
+    queue, adapter, timers = make_queue()
+    results = []
+    queue.submit(request("first"), results.append, lambda error: None)
+    first_request = adapter.requests[0]
+    timers[-1].timeout.emit()
+    queue.submit(request("second"), results.append, lambda error: None)
+    # A late response with the old request name/screen cannot complete the active request.
+    adapter.listener(first_request[3], first_request[0], first_request[1], "", "0")
+    assert results == [] and queue.progress["active_request"] == "second"
+    adapter.values = {("OPT10001", "second", 0, "현재가"): "1", ("OPT10001", "second", 0, "등락율"): "0"}
+    adapter.respond()
+    assert queue.progress["consecutive_timeouts"] == 0
+    assert queue.progress["last_response_at"] == 0.0
+
+
+def test_pause_fails_active_preserves_pending_and_resume_continues() -> None:
+    queue, adapter, _ = make_queue()
+    errors = []
+    queue.submit(request("active"), lambda data: None, errors.append)
+    queue.submit(request("pending"), lambda data: None, errors.append)
+    queue.pause("connection lost")
+    assert len(errors) == 1 and queue.progress["active_request"] is None
+    assert [row[0] for row in adapter.requests] == ["active"]
+    queue.resume()
+    assert [row[0] for row in adapter.requests] == ["active", "pending"]
+
+
+def test_shutdown_while_paused_cancels_preserved_pending() -> None:
+    queue, _, _ = make_queue(); errors = []
+    queue.submit(request("active"), lambda data: None, errors.append)
+    queue.submit(request("pending"), lambda data: None, errors.append)
+    queue.pause(); queue.close()
+    assert len(errors) == 2 and queue.pending_count == 0

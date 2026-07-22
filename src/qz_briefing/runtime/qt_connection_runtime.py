@@ -98,9 +98,7 @@ class QtConnectionRuntime:
         self._started = True
         try:
             self._connection_manager.start()
-            interval_ms = round(
-                self._connection_manager.config.check_interval_seconds * 1000
-            )
+            interval_ms = round(min(1.0, self._connection_manager.config.check_interval_seconds) * 1000)
             self._timer.start(interval_ms)
         except Exception:
             self._started = False

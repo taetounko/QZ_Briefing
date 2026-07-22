@@ -144,6 +144,7 @@ class KiwoomTrRequestQueue:
         minimum_interval_ms: int = DEFAULT_TR_INTERVAL_MS,
         overload_backoff_ms: tuple[int, ...] = DEFAULT_OVERLOAD_BACKOFF_MS,
         monotonic: Callable[[], float] = time.monotonic,
+        timeout_observer: Callable[[int], None] | None = None,
     ) -> None:
         self._adapter = adapter
         self._timer_factory = timer_factory
@@ -153,9 +154,14 @@ class KiwoomTrRequestQueue:
         self._overload_backoff_ms = overload_backoff_ms
         self._monotonic = monotonic
         self._last_dispatch_at: float | None = None
+        self._last_request_started_at: float | None = None
+        self._last_response_at: float | None = None
+        self._consecutive_timeouts = 0
+        self._timeout_observer = timeout_observer
         self._pending: deque[_QueuedRequest] = deque()
         self._active: _QueuedRequest | None = None
         self._closed = False
+        self._paused = False
         self._adapter.add_tr_data_listener(self._handle_tr_data)
 
     @property
@@ -165,6 +171,23 @@ class KiwoomTrRequestQueue:
     @property
     def adapter(self) -> TrAdapter:
         return self._adapter
+
+    @property
+    def progress(self) -> dict[str, object]:
+        return {"last_request_started_at": self._last_request_started_at, "last_response_at": self._last_response_at, "active_request": self._active.request.request_name if self._active else None, "consecutive_timeouts": self._consecutive_timeouts, "pending_count": self.pending_count}
+
+    def set_timeout_observer(self, observer: Callable[[int], None] | None) -> None:
+        self._timeout_observer = observer
+
+    def pause(self, reason: str = "TR queue paused for connection recovery") -> None:
+        if self._closed or self._paused: return
+        self._paused = True
+        active = self._take_active()
+        if active is not None: active.on_error(KiwoomTrError(reason))
+
+    def resume(self) -> None:
+        if self._closed or not self._paused: return
+        self._paused = False; self._start_next()
 
     def submit(
         self,
@@ -252,7 +275,7 @@ class KiwoomTrRequestQueue:
         self.close()
 
     def _start_next(self) -> None:
-        if self._closed or self._active is not None or not self._pending:
+        if self._closed or self._paused or self._active is not None or not self._pending:
             return
         queued = self._pending.popleft()
         self._active = queued
@@ -290,6 +313,7 @@ class KiwoomTrRequestQueue:
             queued.dispatch_timer.stop()
             queued.dispatch_timer = None
         self._last_dispatch_at = self._monotonic()
+        self._last_request_started_at = self._last_dispatch_at
         result = self._adapter.request_tr(
             queued.request.request_name,
             queued.request.tr_code,
@@ -386,16 +410,22 @@ class KiwoomTrRequestQueue:
         active = self._active
         if active is not queued:
             return
+        self._consecutive_timeouts += 1
+        observer = self._timeout_observer
         self._finish_error(
             KiwoomTrTimeoutError(
                 f"TR request timed out: {active.request.request_name}"
             )
         )
+        if observer is not None and not self._closed:
+            observer(self._consecutive_timeouts)
 
     def _finish_success(self, data: TrResult) -> None:
         active = self._take_active()
         if active is None:
             return
+        self._last_response_at = self._monotonic()
+        self._consecutive_timeouts = 0
         try:
             active.on_success(data)
         finally:

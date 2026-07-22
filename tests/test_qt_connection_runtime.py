@@ -122,7 +122,7 @@ class QtConnectionRuntimeTests(unittest.TestCase):
 
     def test_start_converts_seconds_to_milliseconds(self) -> None:
         self.runtime.start()
-        self.assertEqual(self.timer.start_calls, [1250])
+        self.assertEqual(self.timer.start_calls, [1000])
 
     def test_duplicate_start_does_not_duplicate_listener(self) -> None:
         self.runtime.start()
@@ -132,7 +132,7 @@ class QtConnectionRuntimeTests(unittest.TestCase):
     def test_duplicate_start_does_not_restart_timer_or_manager(self) -> None:
         self.runtime.start()
         self.runtime.start()
-        self.assertEqual(self.timer.start_calls, [1250])
+        self.assertEqual(self.timer.start_calls, [1000])
         self.assertEqual(self.manager.start_count, 1)
         self.assertEqual(self.timer.timeout.connect_count, 1)
 

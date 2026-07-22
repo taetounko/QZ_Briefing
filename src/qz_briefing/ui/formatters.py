@@ -2,6 +2,10 @@
 """UI-only labels and safe human-readable numeric formatting."""
 
 STATUS_LABELS = {
+    "CONNECTED": "연결 정상", "RECHECKING": "연결 재확인 중",
+    "RECONNECT_WAIT": "재연결 대기", "RECONNECTING": "재연결 시도 중",
+    "FAILED": "연결 복구 실패", "CONNECTING": "연결 중", "DISCONNECTED": "연결 끊김",
+    "SHUTTING_DOWN": "종료 정리 중", "STOPPED": "연결 종료",
     "strong_downtrend": "강한 하락추세", "downtrend": "하락추세",
     "sideways": "횡보", "uptrend": "상승추세", "strong_uptrend": "강한 상승추세",
     "confirmed": "바닥 확인", "partially_confirmed": "부분 확인",

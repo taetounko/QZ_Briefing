@@ -15,6 +15,7 @@ from qz_briefing.briefing import BriefingStorage, BriefingType, DailyBriefingPip
 from qz_briefing.ui.dashboard_view_model import DashboardViewModel
 from qz_briefing.ui.formatters import money, percent, status_label
 from qz_briefing.ui.main_window import DashboardMainWindow
+from qz_briefing.kiwoom import ConnectionState
 
 
 DAY = date(2026, 7, 22)
@@ -101,6 +102,9 @@ def test_main_window_has_eight_tabs_refreshes_files_and_close_hides(app, tmp_pat
     assert window._holdings.rowCount() == 1 and window._leadership.rowCount() == 1 and window._watchlist.rowCount() == 1
     assert "총 투자금액 1,000,000" in window._holdings_summary.text()
     assert "1234567890" not in window._holdings.item(0, 2).text()
+    window.handle_connection_state(ConnectionState.RECHECKING)
+    assert "재확인" in window._messages.toPlainText()
+    assert status_label("RECONNECT_WAIT") == "재연결 대기"
     event = QCloseEvent(); window.show(); window.closeEvent(event)
     assert not event.isAccepted() and window.isHidden()
     window.tray.icon.contextMenu().actions()[-1].trigger()
