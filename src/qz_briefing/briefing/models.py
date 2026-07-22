@@ -13,6 +13,7 @@ SCHEMA_VERSION = 1
 class BriefingType(str, Enum):
     PRE_MARKET = "pre_market"
     INTRADAY_10AM = "intraday_10am"
+    MARKET_CLOSE = "market_close"
 
 
 @dataclass

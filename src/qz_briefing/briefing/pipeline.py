@@ -10,6 +10,9 @@ from datetime import date, datetime
 from .collectors import BriefingCollector
 from .analysis import analyze_briefing
 from .leadership import score_leader
+from .market_close import (
+    build_next_session_watchlist, compare_market_close, evaluate_market_close,
+)
 from .rules import index_rates
 from .models import (
     SCHEMA_VERSION,
@@ -50,7 +53,7 @@ class DailyBriefingPipeline:
     ) -> BriefingRunResult:
         key = (trading_date, briefing_type)
         if key in self._in_progress or key in self._completed:
-            print("briefing already completed", flush=True)
+            print(f"briefing already completed: {briefing_type.value}", flush=True)
             return BriefingRunResult("skipped", briefing_type, trading_date)
 
         completed, existing_warning = self._validate_existing_result(
@@ -58,7 +61,7 @@ class DailyBriefingPipeline:
         )
         if completed:
             self._completed.add(key)
-            print("briefing already completed", flush=True)
+            print(f"briefing already completed: {briefing_type.value}", flush=True)
             return BriefingRunResult("skipped", briefing_type, trading_date)
 
         self._in_progress.add(key)
@@ -132,6 +135,7 @@ class DailyBriefingPipeline:
                 "errors": context.errors,
             }
             pre_market_source = None
+            intraday_source = None
             if briefing_type is BriefingType.INTRADAY_10AM:
                 try:
                     pre_market_source = self._storage.load_json(
@@ -139,7 +143,16 @@ class DailyBriefingPipeline:
                     )
                 except (OSError, ValueError):
                     pre_market_source = None
-            result["analysis"] = analyze_briefing(result, pre_market_source)
+            elif briefing_type is BriefingType.MARKET_CLOSE:
+                pre_market_source = self._load_same_day_result(
+                    context, BriefingType.PRE_MARKET, "pre-market"
+                )
+                intraday_source = self._load_same_day_result(
+                    context, BriefingType.INTRADAY_10AM, "intraday"
+                )
+            result["analysis"] = analyze_briefing(
+                result, intraday_source or pre_market_source
+            )
             leadership_result = collector_results.get("kiwoom_market_leadership")
             if isinstance(leadership_result, dict) and isinstance(
                 leadership_result.get("data"), dict
@@ -184,6 +197,33 @@ class DailyBriefingPipeline:
                             pre_market_source["holdings_analysis"],
                         )
                     )
+            if briefing_type is BriefingType.MARKET_CLOSE:
+                comparison = compare_market_close(
+                    result, pre_market_source, intraday_source
+                )
+                result["metadata"] = {
+                    "briefing_type": briefing_type.value,
+                    "trading_date": trading_date.isoformat(),
+                    "generated_at": context.completed_at.isoformat(),
+                    "basis": "market_close",
+                }
+                result["previous_results"] = {
+                    "pre_market_loaded": pre_market_source is not None,
+                    "intraday_10am_loaded": intraday_source is not None,
+                    "warnings": [warning for warning in context.warnings if "result" in warning.lower()],
+                }
+                result["session_comparison"] = comparison
+                result["market_close_analysis"] = evaluate_market_close(
+                    result, comparison
+                )
+                result["next_session_watchlist"] = build_next_session_watchlist(result)
+            elif briefing_type is BriefingType.PRE_MARKET:
+                previous_close, warning = self._storage.load_recent_market_close(
+                    trading_date
+                )
+                result["previous_market_close"] = previous_close
+                if warning:
+                    context.warnings.append(warning)
             json_path, markdown_path = self._storage.save(
                 trading_date, briefing_type, result, render_markdown(result)
             )
@@ -199,6 +239,22 @@ class DailyBriefingPipeline:
             )
         finally:
             self._in_progress.discard(key)
+
+    def _load_same_day_result(
+        self, context: BriefingContext, briefing_type: BriefingType, label: str
+    ) -> dict[str, object] | None:
+        try:
+            result = self._storage.load_json(context.trading_date, briefing_type)
+            if result is None:
+                context.warnings.append(f"{label} result not found")
+                return None
+            print(f"{label} result loaded", flush=True)
+            return result
+        except (OSError, ValueError) as exc:
+            context.warnings.append(
+                f"{label} result unavailable: {type(exc).__name__}: {exc}"
+            )
+            return None
 
     def _validate_existing_result(
         self, trading_date: date, briefing_type: BriefingType

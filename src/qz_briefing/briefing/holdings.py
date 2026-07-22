@@ -110,6 +110,7 @@ class HoldingsCollector:
                     "average_price": item["average_price"],
                     "target_price": None, "stop_price": None,
                     "maximum_additional_budget": None, "memo": "",
+                    "account_ids": list(item.get("account_ids", [])),
                     "_account_data": item,
                 }
                 for item in consolidated_result["holdings"]
@@ -185,6 +186,7 @@ class HoldingsCollector:
         except Exception as exc:
             item["trend"] = item["bottom_confirmation"] = item["review_status"] = "insufficient_data"
             item["warnings"].append(f"일봉 분석 실패: {type(exc).__name__}: {exc}")
+        item["next_session_observation"] = next_session_observation(item)
         return item
 
 
@@ -215,3 +217,11 @@ def account_summary(holdings: list[dict[str, object]]) -> dict[str, object]:
     market = sum(float(item.get("market_value") or 0) for item in holdings)
     profit = sum(float(item.get("unrealized_profit") or 0) for item in holdings)
     return {"invested_amount": invested, "market_value": market, "unrealized_profit": profit, "return_rate": profit / invested * 100 if invested else None}
+
+
+def next_session_observation(item: dict[str, object]) -> str:
+    if item.get("trend") == "insufficient_data":
+        return "기술 데이터 확보 후 추세와 저점 방어를 재확인합니다."
+    if item.get("review_status") in {"exit_review", "reduce_risk", "averaging_down_high_risk"}:
+        return "직전 저점 이탈 여부와 거래량 동반 약세를 우선 확인합니다."
+    return "20일선 유지와 거래량 동반 추세 개선 여부를 확인합니다."

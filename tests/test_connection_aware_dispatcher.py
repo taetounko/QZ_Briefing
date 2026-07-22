@@ -98,3 +98,17 @@ def test_shutdown_clears_pending_and_blocks_new_work() -> None:
     )
     assert dispatcher.pending_count == 0
     assert calls == []
+
+
+def test_market_close_timer_and_connection_callbacks_dispatch_once() -> None:
+    dispatcher, state, shutting_down = make_dispatcher()
+    calls: list[str] = []
+    callback = lambda: calls.append("close")
+    dispatcher.dispatch(TRADING_DATE, BriefingType.MARKET_CLOSE, callback)
+    dispatcher.dispatch(TRADING_DATE, BriefingType.MARKET_CLOSE, callback)
+    state[0] = ConnectionState.CONNECTED
+    dispatcher.on_connection_state(ConnectionState.CONNECTED)
+    dispatcher.on_connection_state(ConnectionState.CONNECTED)
+    assert calls == ["close"]
+    shutting_down[0] = True
+    assert not dispatcher.dispatch(TRADING_DATE, BriefingType.MARKET_CLOSE, callback)

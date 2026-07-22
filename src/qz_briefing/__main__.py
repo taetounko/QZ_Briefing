@@ -324,6 +324,9 @@ def run(
                 BriefingType.INTRADAY_10AM.value: lambda: run_briefing(
                     BriefingType.INTRADAY_10AM
                 ),
+                BriefingType.MARKET_CLOSE.value: lambda: run_briefing(
+                    BriefingType.MARKET_CLOSE
+                ),
             }
         )
         shutdown_controller.attach_briefing_scheduler(dispatcher)

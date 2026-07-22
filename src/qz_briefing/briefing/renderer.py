@@ -48,7 +48,53 @@ def render_markdown(result: dict[str, object]) -> str:
     lines.extend(f"- {error}" for error in errors) if errors else lines.append("- 수집 오류 없음")
     lines.extend(render_leadership(result.get("leadership")))
     lines.extend(render_holdings(result.get("holdings_analysis")))
+    if result.get("briefing_type") == "market_close":
+        lines.extend(render_market_close(result))
+    elif result.get("briefing_type") == "pre_market":
+        lines.extend(render_previous_market_close(result.get("previous_market_close")))
     return "\n".join(lines) + "\n"
+
+
+def render_market_close(result: dict[str, object]) -> list[str]:
+    analysis = result.get("market_close_analysis") if isinstance(result.get("market_close_analysis"), dict) else {}
+    comparison = result.get("session_comparison") if isinstance(result.get("session_comparison"), dict) else {}
+    lines = [
+        "", "# 장마감 브리핑", "",
+        f"## 오늘 시장 한 줄 결론", "", str(analysis.get("market_conclusion", "방향성 불명확")),
+        "", "## 장전 예상 대비 결과", "", str(analysis.get("pre_market_evaluation", "판단 자료 부족")),
+        "", "## 오전 10시 대비 결과", "", str(analysis.get("intraday_evaluation", "판단 자료 부족")),
+        "", "## 지수·대형주 결산", "", "- 장전·10시·장마감 수치 중 확인 가능한 값만 비교했습니다.",
+        "", "## 외국인·기관·프로그램·파생 수급", "", str(analysis.get("flow_summary", "수급 판단 자료 부족")),
+        "", "## 시장 주도주 결산", "", str(analysis.get("leadership_summary", "자료 부족")),
+        "", "## 반등 후보 결산", "", str(analysis.get("rebound_summary", "자료 부족")),
+        "", "## 다음 거래일 핵심 관찰 목록", "",
+    ]
+    watchlist = result.get("next_session_watchlist", [])
+    if isinstance(watchlist, list) and watchlist:
+        for item in watchlist:
+            if isinstance(item, dict):
+                lines.append(f"- [{item.get('category')}] {item.get('name') or item.get('code')}: {item.get('current_state')} / 확인: {item.get('confirmation_condition')} / 위험: {item.get('risk_condition')}")
+    else:
+        lines.append("- 관찰 목록 데이터가 없습니다.")
+    lines.extend(["", "## 장마감 위험요인", "", str(analysis.get("risk_summary", "별도 위험요인 없음"))])
+    if not any(isinstance(value, dict) and value.get("available") for value in comparison.values()):
+        lines.extend(["", "- 장전·10시 비교자료가 없어 장마감 단독 분석입니다."])
+    return lines
+
+
+def render_previous_market_close(value: object) -> list[str]:
+    lines = ["", "## 전 거래일 장마감 요약", ""]
+    if not isinstance(value, dict):
+        lines.append("- 유효한 이전 장마감 결과가 없습니다.")
+        return lines
+    analysis = value.get("market_close_analysis") if isinstance(value.get("market_close_analysis"), dict) else {}
+    lines.extend([
+        f"- 기준 거래일: {value.get('trading_date')}",
+        f"- 시장 결론: {analysis.get('market_conclusion', '방향성 불명확')}",
+        f"- 수급: {analysis.get('flow_summary', '자료 부족')}",
+        f"- 다음 거래일: {analysis.get('next_session_summary', '관찰 자료 부족')}",
+    ])
+    return lines
 
 
 def render_leadership(value: object) -> list[str]:

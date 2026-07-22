@@ -4,6 +4,7 @@ from datetime import datetime
 
 from qz_briefing.scheduling.briefing_scheduler import (
     INTRADAY_10AM,
+    MARKET_CLOSE,
     PRE_MARKET,
     BriefingScheduler,
     briefing_plan,
@@ -39,11 +40,12 @@ class FakeTimer:
         self.stop_count += 1
 
 
-def test_before_8_am_schedules_pre_market_and_10_am() -> None:
+def test_before_8_am_schedules_pre_market_10_am_and_market_close() -> None:
     plan = briefing_plan(datetime(2026, 7, 20, 7, 30))
     assert [(item.name, item.run_immediately, item.delay_ms) for item in plan] == [
         (PRE_MARKET, False, 30 * 60 * 1000),
         (INTRADAY_10AM, False, 150 * 60 * 1000),
+        (MARKET_CLOSE, False, 490 * 60 * 1000),
     ]
 
 
@@ -63,15 +65,22 @@ def test_between_8_and_10_runs_pre_market_immediately() -> None:
     assert plan[1].delay_ms == 1000
 
 
-def test_at_or_after_10_runs_only_intraday_immediately() -> None:
+def test_at_10_runs_intraday_and_schedules_market_close() -> None:
     at_ten = briefing_plan(datetime(2026, 7, 20, 10, 0))
-    after_ten = briefing_plan(datetime(2026, 7, 20, 15, 0))
     assert [(item.name, item.run_immediately) for item in at_ten] == [
-        (INTRADAY_10AM, True)
+        (INTRADAY_10AM, True), (MARKET_CLOSE, False)
     ]
-    assert [(item.name, item.run_immediately) for item in after_ten] == [
-        (INTRADAY_10AM, True)
-    ]
+
+
+def test_market_close_time_policy_and_operating_end() -> None:
+    before = briefing_plan(datetime(2026, 7, 20, 15, 39, 59))
+    at_close = briefing_plan(datetime(2026, 7, 20, 15, 40))
+    after_close = briefing_plan(datetime(2026, 7, 20, 19, 59))
+    at_end = briefing_plan(datetime(2026, 7, 20, 20, 0))
+    assert before[-1].name == MARKET_CLOSE and before[-1].delay_ms == 1000
+    assert [(item.name, item.run_immediately) for item in at_close] == [(MARKET_CLOSE, True)]
+    assert [(item.name, item.run_immediately) for item in after_close] == [(MARKET_CLOSE, True)]
+    assert at_end == ()
 
 
 def test_scheduler_prevents_duplicate_execution_for_same_day_and_name() -> None:
@@ -107,15 +116,15 @@ def test_stop_cancels_all_scheduled_timers() -> None:
         return timer
 
     scheduler = BriefingScheduler(
-        {PRE_MARKET: lambda: None, INTRADAY_10AM: lambda: None},
+        {PRE_MARKET: lambda: None, INTRADAY_10AM: lambda: None, MARKET_CLOSE: lambda: None},
         timer_factory=make_timer,
     )
     scheduler.schedule(datetime(2026, 7, 20, 7, 30))
     scheduler.stop()
     scheduler.stop()
 
-    assert len(timers) == 2
-    assert [timer.stop_count for timer in timers] == [1, 1]
+    assert len(timers) == 3
+    assert [timer.stop_count for timer in timers] == [1, 1, 1]
 
 
 def test_injected_callback_runs_for_intraday_task() -> None:

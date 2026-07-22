@@ -12,8 +12,11 @@ from qz_briefing.briefing.models import BriefingType
 
 PRE_MARKET = BriefingType.PRE_MARKET.value
 INTRADAY_10AM = BriefingType.INTRADAY_10AM.value
+MARKET_CLOSE = BriefingType.MARKET_CLOSE.value
 PRE_MARKET_TIME = time(8, 0)
 INTRADAY_TIME = time(10, 0)
+MARKET_CLOSE_TIME = time(15, 40)
+OPERATING_END_TIME = time(20, 0)
 
 
 @dataclass(frozen=True)
@@ -27,32 +30,33 @@ def briefing_plan(now: datetime) -> tuple[BriefingPlanItem, ...]:
     """Return today's explicit catch-up and future scheduling policy."""
     pre_market_at = datetime.combine(now.date(), PRE_MARKET_TIME, tzinfo=now.tzinfo)
     intraday_at = datetime.combine(now.date(), INTRADAY_TIME, tzinfo=now.tzinfo)
+    market_close_at = datetime.combine(now.date(), MARKET_CLOSE_TIME, tzinfo=now.tzinfo)
+    operating_end_at = datetime.combine(now.date(), OPERATING_END_TIME, tzinfo=now.tzinfo)
+
+    def scheduled(name: str, at: datetime) -> BriefingPlanItem:
+        return BriefingPlanItem(name, False, math.ceil((at - now).total_seconds() * 1000))
+
+    if now >= operating_end_at:
+        return ()
 
     if now < pre_market_at:
         return (
-            BriefingPlanItem(
-                PRE_MARKET,
-                False,
-                math.ceil((pre_market_at - now).total_seconds() * 1000),
-            ),
-            BriefingPlanItem(
-                INTRADAY_10AM,
-                False,
-                math.ceil((intraday_at - now).total_seconds() * 1000),
-            ),
+            scheduled(PRE_MARKET, pre_market_at),
+            scheduled(INTRADAY_10AM, intraday_at),
+            scheduled(MARKET_CLOSE, market_close_at),
         )
     if now < intraday_at:
         return (
             BriefingPlanItem(PRE_MARKET, True, 0),
-            BriefingPlanItem(
-                INTRADAY_10AM,
-                False,
-                math.ceil((intraday_at - now).total_seconds() * 1000),
-            ),
+            scheduled(INTRADAY_10AM, intraday_at),
+            scheduled(MARKET_CLOSE, market_close_at),
         )
-
-    # Explicit late-start policy: skip stale pre-market work at/after 10:00.
-    return (BriefingPlanItem(INTRADAY_10AM, True, 0),)
+    if now < market_close_at:
+        return (
+            BriefingPlanItem(INTRADAY_10AM, True, 0),
+            scheduled(MARKET_CLOSE, market_close_at),
+        )
+    return (BriefingPlanItem(MARKET_CLOSE, True, 0),)
 
 
 class SignalLike(Protocol):

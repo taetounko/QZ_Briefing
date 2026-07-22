@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 from .models import BriefingType
@@ -61,10 +61,37 @@ class BriefingStorage:
                 continue
             if saved_date >= trading_date:
                 continue
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
+            try:
+                loaded = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if (
+                isinstance(loaded, dict)
+                and loaded.get("trading_date") == saved_date.isoformat()
+                and loaded.get("briefing_type") == briefing_type.value
+                and loaded.get("status") in {"completed", "completed_with_errors"}
+            ):
                 return loaded
         return None
+
+    def load_recent_market_close(
+        self, trading_date: date, *, stale_after_days: int = 7,
+        max_search_days: int = 31,
+    ) -> tuple[dict[str, object] | None, str | None]:
+        """Find a valid prior close file without assuming the previous calendar day."""
+        latest = self.load_latest_before(trading_date, BriefingType.MARKET_CLOSE)
+        if latest is None:
+            return None, "previous market-close result not found"
+        try:
+            saved_date = date.fromisoformat(str(latest.get("trading_date")))
+        except ValueError:
+            return None, "previous market-close trading_date is invalid"
+        age = trading_date - saved_date
+        if age > timedelta(days=max_search_days):
+            return None, "previous market-close result not found within search window"
+        if age > timedelta(days=stale_after_days):
+            return latest, f"previous market-close result is stale: {age.days} days old"
+        return latest, None
 
     def save(
         self,
