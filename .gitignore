@@ -26,6 +26,9 @@ Desktop.ini
 config/*
 !config/.gitkeep
 !config/holdings.example.json
+!config/notifications.example.json
+config/notifications.json
+config/telegram_token.dpapi
 data/*
 !data/.gitkeep
 data/briefings/

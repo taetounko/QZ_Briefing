@@ -1,0 +1,10 @@
+{
+  "telegram": {
+    "enabled": false,
+    "chat_id": "",
+    "send_markdown_file": true,
+    "send_json_file": false,
+    "send_runtime_alerts": true,
+    "send_daily_summary": true
+  }
+}

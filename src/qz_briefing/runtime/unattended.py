@@ -131,6 +131,7 @@ class RuntimeMonitor:
         self._cleanup_runtime_temps()
         self.recovery: MissingBriefingRecovery | None = None
         self.extra_status: Callable[[], Mapping[str, object]] = dict
+        self.summary_listener: Callable[[dict[str, object]], None] | None = None
 
     @property
     def runtime_dir(self): return self.root / "runtime"
@@ -190,6 +191,9 @@ class RuntimeMonitor:
         overall = "successful" if completed == 3 and not self.warnings and not self.errors else "successful_with_warnings" if completed == 3 else "partial" if completed else "failed"
         payload = {"started_at": self.started_at.isoformat(), "automatic_start": True, "automatic_login_result": self.connection_state(), "briefings": results, "connection_drop_count": self.connection_drop_count, "automatic_reconnect_count": self.reconnect_count, "tr_timeout_count": self.timeout_count, "overload_retry_count": self.overload_retry_count, "briefing_recovery_count": self.recovery_count, "warning_count": len(self.warnings), "error_count": len(self.errors), "normal_shutdown": normal_shutdown, "ended_at": self.clock().isoformat(), "overall_result": overall, "events": self.events[-20:]}
         target = self.runtime_dir / "history" / f"{self.clock().date().isoformat()}.json"; atomic_write_json(target, payload)
+        if self.summary_listener is not None:
+            try: self.summary_listener(payload)
+            except Exception: logging.getLogger(__name__).exception("daily summary notification enqueue failed")
 
 
 def _pid_alive(pid: int) -> bool:

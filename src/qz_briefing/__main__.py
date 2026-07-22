@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 import sys
 import argparse
+import getpass
+import json
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, time
 from pathlib import Path
@@ -42,6 +44,13 @@ from qz_briefing.runtime import (
     SleepInhibitor, configure_daily_logging,
 )
 from qz_briefing.runtime.automatic_shutdown import GracefulShutdownController
+from qz_briefing.notifications import (
+    DisabledNotificationService, DpapiSecretStore, NotificationRequest,
+    NotificationService, PersistentNotificationQueue, TelegramAdapter,
+    format_briefing,
+)
+from qz_briefing.notifications.formatter import format_daily_summary, format_runtime_alert
+from qz_briefing.runtime.unattended import atomic_write_json
 from qz_briefing.scheduling import (
     BriefingScheduler,
     PREOPEN_MONITORING,
@@ -111,7 +120,68 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
         dest="run_now",
         help="run one briefing immediately after Kiwoom login",
     )
-    return parser.parse_args(raw)
+    commands = parser.add_mutually_exclusive_group()
+    commands.add_argument("--configure-telegram", action="store_true")
+    commands.add_argument("--disable-telegram", action="store_true")
+    commands.add_argument("--test-notification", action="store_true")
+    parser.add_argument("--remove-secret", action="store_true", help=argparse.SUPPRESS)
+    parsed = parser.parse_args(raw)
+    if parsed.remove_secret and not parsed.disable_telegram:
+        parser.error("--remove-secret requires --disable-telegram")
+    return parsed
+
+
+def mask_chat_id(value: str) -> str:
+    return "*" * max(0, len(value) - 4) + value[-4:]
+
+
+def load_notification_config(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def create_notification_service(project_root: Path, data_root: Path, timer_factory=None):
+    config = load_notification_config(project_root / "config" / "notifications.json")
+    telegram = config.get("telegram") if isinstance(config.get("telegram"), dict) else {}
+    if not telegram.get("enabled"):
+        print("Telegram notifications disabled", flush=True)
+        return DisabledNotificationService()
+    try:
+        token = DpapiSecretStore(project_root / "config" / "telegram_token.dpapi").load()
+        adapter = TelegramAdapter(token, str(telegram.get("chat_id", "")))
+        return NotificationService(
+            adapter, PersistentNotificationQueue(data_root / "runtime" / "notification_queue.json"),
+            data_root / "runtime" / "notification_delivery_history.json",
+            send_markdown_file=bool(telegram.get("send_markdown_file", True)),
+            send_json_file=bool(telegram.get("send_json_file", False)),
+            send_runtime_alerts=bool(telegram.get("send_runtime_alerts", True)),
+            send_daily_summary=bool(telegram.get("send_daily_summary", True)),
+            timer_factory=timer_factory,
+        )
+    except Exception:
+        print("Telegram token unavailable; notifications disabled", flush=True)
+        return DisabledNotificationService()
+
+
+def handle_notification_cli(options: argparse.Namespace, project_root: Path, *, input_secret=getpass.getpass, input_text=input, adapter_factory=TelegramAdapter, secret_store_factory=DpapiSecretStore) -> int | None:
+    if not (options.configure_telegram or options.disable_telegram or options.test_notification):
+        return None
+    config_path = project_root / "config" / "notifications.json"; secret_path = project_root / "config" / "telegram_token.dpapi"
+    config = load_notification_config(config_path); telegram = config.get("telegram") if isinstance(config.get("telegram"), dict) else {}
+    if options.disable_telegram:
+        telegram = {**telegram, "enabled": False}; atomic_write_json(config_path, {"telegram": telegram})
+        if options.remove_secret: secret_store_factory(secret_path).remove()
+        print("Telegram notifications disabled", flush=True); return 0
+    if options.configure_telegram:
+        token = input_secret("Telegram Bot Token: "); chat_id = input_text("Telegram Chat ID: ").strip()
+        adapter_factory(token, chat_id).send_text("QZ Briefing Telegram 연결 테스트", parse_mode=None)
+        secret_store_factory(secret_path).save(token)
+        telegram = {**telegram, "enabled": True, "chat_id": chat_id, "send_markdown_file": telegram.get("send_markdown_file", True), "send_json_file": telegram.get("send_json_file", False), "send_runtime_alerts": telegram.get("send_runtime_alerts", True), "send_daily_summary": telegram.get("send_daily_summary", True)}
+        atomic_write_json(config_path, {"telegram": telegram}); print(f"Telegram configured: chat={mask_chat_id(chat_id)}", flush=True); return 0
+    token = secret_store_factory(secret_path).load(); chat_id = str(telegram.get("chat_id", "")); adapter_factory(token, chat_id).send_text("QZ Briefing 테스트 알림", parse_mode=None); print(f"Test notification sent: chat={mask_chat_id(chat_id)}", flush=True); return 0
 
 
 def check_market_day(target_date: date) -> TradingDayResult:
@@ -288,6 +358,10 @@ def run(
 ) -> int:
     """Assemble the connection runtime and keep the Qt event loop running."""
     options = parse_cli_arguments(arguments)
+    project_root = Path(__file__).resolve().parents[2]
+    cli_result = handle_notification_cli(options, project_root)
+    if cli_result is not None:
+        return cli_result
     manual_market_close = options.run_now == BriefingType.MARKET_CLOSE.value
     if manual_market_close:
         print("manual briefing requested: market_close", flush=True)
@@ -304,8 +378,9 @@ def run(
     try:
         application = application_factory(sys.argv if arguments is None else arguments)
         from PyQt5.QtCore import QTimer
-        data_root = Path(__file__).resolve().parents[2] / "data"
+        data_root = project_root / "data"
         logging_configurator(data_root)
+        notification_service = create_notification_service(project_root, data_root, QTimer)
         print(f"PROCESS PID: {os.getpid()}", flush=True)
         print("QAPPLICATION READY", flush=True)
         shutdown_controller = shutdown_controller_factory(application, process_lock)
@@ -346,6 +421,7 @@ def run(
         )
         shutdown_controller.attach_briefing_scheduler(runtime_monitor)
         shutdown_controller.attach_briefing_scheduler(sleep_inhibitor)
+        shutdown_controller.attach_briefing_scheduler(notification_service)
         if hasattr(tr_queue, "set_timeout_observer"):
             def observe_tr_timeout(count: int) -> None:
                 if count < 2: return
@@ -354,6 +430,19 @@ def run(
             tr_queue.set_timeout_observer(observe_tr_timeout)
         shutdown_controller.attach_briefing_scheduler(tr_queue)
         pipeline = briefing_pipeline_factory(clock, tr_queue)
+        if hasattr(pipeline, "add_completion_listener"):
+            def notify_saved_briefing(name: str, path: str) -> None:
+                try:
+                    if "validation" in name: return
+                    json_path = Path(path); result = json.loads(json_path.read_text(encoding="utf-8"))
+                    if not isinstance(result, dict): return
+                    notification_service.submit(NotificationRequest(
+                        event_type=str(result.get("briefing_type")), trading_date=str(result.get("trading_date")),
+                        text=format_briefing(result), markdown_path=str(json_path.with_suffix(".md")), json_path=str(json_path),
+                    ))
+                except Exception:
+                    logging.getLogger(__name__).exception("notification enqueue failed; briefing remains complete")
+            pipeline.add_completion_listener(notify_saved_briefing)
         preopen_source = (
             KiwoomPreopenRealSource(adapter, ("005930", "000660"))
             if hasattr(adapter, "add_real_data_listener") else None
@@ -369,7 +458,20 @@ def run(
             "sleep_prevention_active": sleep_inhibitor.active,
             "preopen_monitoring_status": preopen_monitor.result.get("coverage_status"),
             "preopen_sample_count": preopen_monitor.result.get("sample_count"),
+            "telegram_enabled": notification_service.status.enabled,
+            "telegram_configured": notification_service.status.configured,
+            "telegram_last_success_at": notification_service.status.last_success_at,
+            "telegram_last_event": notification_service.status.last_event,
+            "telegram_pending_count": notification_service.status.pending_count,
+            "telegram_last_error": notification_service.status.last_error,
+            "telegram_next_attempt_at": notification_service.status.next_attempt_at,
         }
+        runtime_monitor.summary_listener = lambda summary: notification_service.send_daily_summary and notification_service.submit(
+            NotificationRequest(
+                event_type="daily_summary", trading_date=clock().date().isoformat(),
+                text=format_daily_summary(summary),
+            )
+        )
         if hasattr(pipeline, "set_preopen_monitoring_provider"):
             pipeline.set_preopen_monitoring_provider(lambda: preopen_monitor.result)
         shutdown_controller.attach_briefing_scheduler(preopen_monitor)
@@ -415,13 +517,27 @@ def run(
                     preopen_source.stop()
             def execute() -> None:
                 runtime_monitor.briefing_started(briefing_type.value)
-                pipeline.run(
-                    briefing_type,
-                    now.date(),
-                    market_calendar_status=trading_day.status.value,
-                    market_calendar_reason=trading_day.reason,
-                    market_calendar_warning=trading_day.warning,
-                )
+                try:
+                    pipeline.run(
+                        briefing_type,
+                        now.date(),
+                        market_calendar_status=trading_day.status.value,
+                        market_calendar_reason=trading_day.reason,
+                        market_calendar_warning=trading_day.warning,
+                    )
+                except Exception:
+                    if notification_service.send_runtime_alerts:
+                        notification_service.submit(
+                            NotificationRequest(
+                                event_type="briefing_failed",
+                                trading_date=now.date().isoformat(),
+                                text=format_runtime_alert(
+                                    f"{briefing_type.value} 브리핑 생성에 실패했습니다.",
+                                    clock().strftime("%H:%M"),
+                                ),
+                            )
+                        )
+                    raise
             dispatcher.dispatch(
                 now.date(),
                 briefing_type,

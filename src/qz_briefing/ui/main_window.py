@@ -95,7 +95,9 @@ class DashboardMainWindow(QMainWindow):
             f"{key}: {runtime.get(key, '-')}" for key in (
                 "started_at", "last_heartbeat_at", "health", "connection_state",
                 "active_briefing", "next_scheduled_task", "last_completed_briefing",
-                "shutdown_scheduled_at",
+                "shutdown_scheduled_at", "telegram_configured", "telegram_enabled",
+                "telegram_last_success_at", "telegram_last_event",
+                "telegram_pending_count", "telegram_last_error", "telegram_next_attempt_at",
             )
         ]
         self._summary.setPlainText("\n".join(f"{key}: {value}" for key, value in summary.items()) + "\n" + "\n".join(runtime_lines))
