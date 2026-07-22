@@ -29,6 +29,7 @@ class DashboardViewModel:
         results = {name: self._load_pair(directory, *paths[:2], next_time=paths[2]) for name, paths in RESULT_NAMES.items()}
         valid = [value for value in results.values() if isinstance(value.get("json"), dict)]
         latest = max(valid, key=lambda value: self._completed_key(value["json"]), default=None)
+        runtime = self._load_runtime()
         return {
             "date": target.isoformat(), "results": results,
             "latest": latest.get("json") if latest else {},
@@ -37,7 +38,16 @@ class DashboardViewModel:
             "leadership": self.leadership(latest.get("json") if latest else {}),
             "watchlist": self.watchlist(latest.get("json") if latest else {}),
             "messages": self.messages(results),
+            "runtime": runtime,
         }
+
+    def _load_runtime(self) -> dict[str, object]:
+        path = self.root.parent / "runtime" / "heartbeat.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+        except (OSError, ValueError):
+            return {}
 
     def _load_pair(self, directory: Path, json_name: str, markdown_name: str, *, next_time: str) -> dict[str, object]:
         json_path, markdown_path = directory / json_name, directory / markdown_name

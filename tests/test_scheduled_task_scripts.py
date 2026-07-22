@@ -31,6 +31,7 @@ def test_install_script_uses_daily_730_am_trigger() -> None:
     content = _read_script(INSTALL_SCRIPT)
     assert "New-ScheduledTaskTrigger -Daily -At \"07:30\"" in content
     assert "-MultipleInstances IgnoreNew" in content
+    assert "-WakeToRun" in content
 
 
 def test_install_script_uses_project_virtualenv_python() -> None:

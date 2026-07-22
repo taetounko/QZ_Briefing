@@ -131,6 +131,20 @@ class FakeTrQueue:
         self.stopped = True
 
 
+class FakeSleepInhibitor:
+    def start(self) -> bool: return True
+    def stop(self) -> None: return None
+
+
+class FakeRuntimeMonitor:
+    def __init__(self, *args, **kwargs) -> None:
+        self.active_briefing = None; self.recovery = None
+    def start(self) -> None: return None
+    def stop(self) -> None: return None
+    def briefing_started(self, name) -> None: self.active_briefing = name
+    def briefing_completed(self, name) -> None: self.active_briefing = None
+
+
 def run(*args: object, **kwargs: object) -> int:
     """Run entry-point tests with a deterministic non-Qt shutdown controller."""
     kwargs.setdefault("shutdown_controller_factory", FakeShutdownController)
@@ -143,6 +157,9 @@ def run(*args: object, **kwargs: object) -> int:
     kwargs.setdefault("briefing_scheduler_factory", FakeBriefingScheduler)
     kwargs.setdefault("tr_queue_factory", FakeTrQueue)
     kwargs.setdefault("dashboard_factory", None)
+    kwargs.setdefault("sleep_inhibitor_factory", FakeSleepInhibitor)
+    kwargs.setdefault("runtime_monitor_factory", FakeRuntimeMonitor)
+    kwargs.setdefault("logging_configurator", lambda root: None)
     kwargs.setdefault("clock", lambda: datetime(2026, 7, 20, 9, 0))
     return application_run(*args, **kwargs)  # type: ignore[arg-type]
 

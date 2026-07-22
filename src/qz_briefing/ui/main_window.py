@@ -90,7 +90,15 @@ class DashboardMainWindow(QMainWindow):
 
     def refresh(self) -> None:
         model = self._view_model.load_today(); summary = model["summary"]
-        self._summary.setPlainText("\n".join(f"{key}: {value}" for key, value in summary.items()))
+        runtime = model.get("runtime", {})
+        runtime_lines = ["", "[운영상태]"] + [
+            f"{key}: {runtime.get(key, '-')}" for key in (
+                "started_at", "last_heartbeat_at", "health", "connection_state",
+                "active_briefing", "next_scheduled_task", "last_completed_briefing",
+                "shutdown_scheduled_at",
+            )
+        ]
+        self._summary.setPlainText("\n".join(f"{key}: {value}" for key, value in summary.items()) + "\n" + "\n".join(runtime_lines))
         for key, view in self._result_views.items():
             wrapper = model["results"][key]; payload = wrapper.get("json")
             if not isinstance(payload, dict):

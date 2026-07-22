@@ -37,7 +37,10 @@ from qz_briefing.kiwoom import (
     KiwoomQAxAdapter,
     KiwoomTrRequestQueue,
 )
-from qz_briefing.runtime import QtConnectionRuntime
+from qz_briefing.runtime import (
+    MissingBriefingRecovery, QtConnectionRuntime, RuntimeMonitor,
+    SleepInhibitor, configure_daily_logging,
+)
 from qz_briefing.runtime.automatic_shutdown import GracefulShutdownController
 from qz_briefing.scheduling import (
     BriefingScheduler,
@@ -87,6 +90,8 @@ BriefingPipelineFactory = Callable[
 ]
 TrQueueFactory = Callable[[KiwoomQAxAdapter], KiwoomTrRequestQueue]
 DashboardFactory = Callable[..., object]
+SleepInhibitorFactory = Callable[[], SleepInhibitor]
+RuntimeMonitorFactory = Callable[..., RuntimeMonitor]
 
 
 def create_dashboard(**kwargs: object) -> object:
@@ -276,6 +281,9 @@ def run(
     briefing_pipeline_factory: BriefingPipelineFactory = create_briefing_pipeline,
     tr_queue_factory: TrQueueFactory = KiwoomTrRequestQueue,
     dashboard_factory: DashboardFactory | None = create_dashboard,
+    sleep_inhibitor_factory: SleepInhibitorFactory = SleepInhibitor,
+    runtime_monitor_factory: RuntimeMonitorFactory = RuntimeMonitor,
+    logging_configurator: Callable[[Path], object] = configure_daily_logging,
     clock: LocalClock = datetime.now,
 ) -> int:
     """Assemble the connection runtime and keep the Qt event loop running."""
@@ -292,14 +300,20 @@ def run(
     adapter: KiwoomQAxAdapter | None = None
     runtime: QtConnectionRuntime | None = None
     briefing_scheduler: BriefingScheduler | None = None
+    sleep_inhibitor: SleepInhibitor | None = None
     try:
         application = application_factory(sys.argv if arguments is None else arguments)
+        from PyQt5.QtCore import QTimer
+        data_root = Path(__file__).resolve().parents[2] / "data"
+        logging_configurator(data_root)
         print(f"PROCESS PID: {os.getpid()}", flush=True)
         print("QAPPLICATION READY", flush=True)
         shutdown_controller = shutdown_controller_factory(application, process_lock)
         application.aboutToQuit.connect(shutdown_controller.handle_application_quit)
         if not shutdown_controller.schedule():
             return 0
+        sleep_inhibitor = sleep_inhibitor_factory()
+        sleep_inhibitor.start()
 
         now = clock()
         trading_day = market_day_checker(now.date())
@@ -324,6 +338,14 @@ def run(
         print("KIWOOM OCX READY", flush=True)
         manager = manager_factory(adapter)
         tr_queue = tr_queue_factory(adapter)
+        runtime_monitor = runtime_monitor_factory(
+            data_root, timer_factory=QTimer, clock=clock,
+            connection_state=lambda: manager.state.name,
+            tr_progress=lambda: getattr(tr_queue, "progress", {}),
+            watchdog_recover=lambda reason: manager.request_connection_recheck(reason),
+        )
+        shutdown_controller.attach_briefing_scheduler(runtime_monitor)
+        shutdown_controller.attach_briefing_scheduler(sleep_inhibitor)
         if hasattr(tr_queue, "set_timeout_observer"):
             def observe_tr_timeout(count: int) -> None:
                 if count < 2: return
@@ -332,7 +354,6 @@ def run(
             tr_queue.set_timeout_observer(observe_tr_timeout)
         shutdown_controller.attach_briefing_scheduler(tr_queue)
         pipeline = briefing_pipeline_factory(clock, tr_queue)
-        from PyQt5.QtCore import QTimer
         preopen_source = (
             KiwoomPreopenRealSource(adapter, ("005930", "000660"))
             if hasattr(adapter, "add_real_data_listener") else None
@@ -344,6 +365,11 @@ def run(
                 "warnings": ["official real-time interface is unavailable"],
             }, clock=clock, timer_factory=QTimer
         )
+        runtime_monitor.extra_status = lambda: {
+            "sleep_prevention_active": sleep_inhibitor.active,
+            "preopen_monitoring_status": preopen_monitor.result.get("coverage_status"),
+            "preopen_sample_count": preopen_monitor.result.get("sample_count"),
+        }
         if hasattr(pipeline, "set_preopen_monitoring_provider"):
             pipeline.set_preopen_monitoring_provider(lambda: preopen_monitor.result)
         shutdown_controller.attach_briefing_scheduler(preopen_monitor)
@@ -387,16 +413,19 @@ def run(
                 preopen_monitor.stop()
                 if preopen_source is not None:
                     preopen_source.stop()
-            dispatcher.dispatch(
-                now.date(),
-                briefing_type,
-                lambda: pipeline.run(
+            def execute() -> None:
+                runtime_monitor.briefing_started(briefing_type.value)
+                pipeline.run(
                     briefing_type,
                     now.date(),
                     market_calendar_status=trading_day.status.value,
                     market_calendar_reason=trading_day.reason,
                     market_calendar_warning=trading_day.warning,
-                ),
+                )
+            dispatcher.dispatch(
+                now.date(),
+                briefing_type,
+                execute,
             )
 
         pre_market_grace_timer = None
@@ -441,6 +470,15 @@ def run(
                     BriefingType.MARKET_CLOSE
                 ),
         }
+        runtime_monitor.recovery = MissingBriefingRecovery(
+            data_root, callbacks, clock=clock,
+            running=lambda name: runtime_monitor.active_briefing == name,
+            pending=lambda name: False,
+        )
+        if hasattr(pipeline, "add_completion_listener"):
+            pipeline.add_completion_listener(
+                lambda name, path: runtime_monitor.briefing_completed(name.split()[0])
+            )
         if not manual_market_close:
             briefing_scheduler = briefing_scheduler_factory(callbacks)
         shutdown_controller.attach_briefing_scheduler(dispatcher)
@@ -467,6 +505,7 @@ def run(
         shutdown_controller.attach_runtime(runtime)
         if not runtime.start():
             raise RuntimeError("Kiwoom connection runtime did not start")
+        runtime_monitor.start()
         print("RUNTIME STARTED", flush=True)
         if manual_market_close:
             def execute_validation() -> None:
@@ -493,6 +532,8 @@ def run(
             briefing_scheduler.schedule(now)
         return int(application.exec_())
     finally:
+        if sleep_inhibitor is not None:
+            sleep_inhibitor.stop()
         if runtime is None and adapter is not None:
             adapter.close()
         if shutdown_controller is None:
