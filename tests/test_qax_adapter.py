@@ -66,6 +66,7 @@ class FakeQAxWidget:
         self.dynamic_call_calls: list[str] = []
         self.master_names = {"005930": "삼성전자"}
         self.master_prices = {"005930": "+72,500"}
+        self.login_info = {"ACCNO": "12345678;"}
         self.comm_data = {("OPT10001", "stock", 0, "현재가"): " +72,500 "}
         self.dynamic_call_arguments: list[tuple[object, ...]] = []
         self.close_count = 0
@@ -89,6 +90,8 @@ class FakeQAxWidget:
             return self.master_names[str(arguments[0])]
         if signature == "GetMasterLastPrice(QString)":
             return self.master_prices[str(arguments[0])]
+        if signature == "GetLoginInfo(QString)":
+            return self.login_info[str(arguments[0])]
         if signature == "SetInputValue(QString, QString)":
             return None
         if signature == "CommRqData(QString, QString, int, QString)":
@@ -105,6 +108,13 @@ class FakeQAxWidget:
 
 
 class KiwoomQAxAdapterTests(unittest.TestCase):
+    def test_get_login_info_uses_official_dynamic_call_without_transforming_value(self) -> None:
+        widget = FakeQAxWidget()
+        adapter = KiwoomQAxAdapter(widget=widget)
+
+        self.assertEqual(adapter.get_login_info("ACCNO"), "12345678;")
+        self.assertIn(("ACCNO",), widget.dynamic_call_arguments)
+
     def test_read_only_tr_wrappers_forward_arguments_and_trim_data(self) -> None:
         widget = FakeQAxWidget()
         adapter = KiwoomQAxAdapter(widget=widget)

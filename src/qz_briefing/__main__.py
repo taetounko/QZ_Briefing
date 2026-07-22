@@ -23,6 +23,7 @@ from qz_briefing.briefing import (
     KiwoomInvestorFlowDataSource,
     KiwoomLeadershipCollector,
     KiwoomLeadershipDataSource,
+    KiwoomAccountHoldingsSource,
     KiwoomStockBasicDataSource,
     UnavailableFuturesContractResolver,
 )
@@ -130,6 +131,9 @@ def create_briefing_pipeline(
                 stock_source,
                 daily_source,
                 leadership_codes=lambda: set(selected_leadership_codes),
+                account_source=KiwoomAccountHoldingsSource(
+                    tr_queue.adapter, tr_queue
+                ),
                 clock=clock,
             ),
         ],

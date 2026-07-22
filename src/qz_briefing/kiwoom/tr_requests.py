@@ -77,6 +77,8 @@ class TrRequest:
     output_fields: tuple[str, ...]
     timeout_ms: int = 10_000
     repeat: bool = False
+    paginate: bool = False
+    max_pages: int = 20
 
 
 TrResult: TypeAlias = dict[str, str] | list[dict[str, str]]
@@ -89,6 +91,8 @@ class _QueuedRequest:
     on_error: Callable[[Exception], None]
     screen_no: str | None = None
     timer: TimerLike | None = None
+    rows: list[dict[str, str]] | None = None
+    page_count: int = 0
 
 
 class ScreenNumberPool:
@@ -136,6 +140,10 @@ class KiwoomTrRequestQueue:
     @property
     def pending_count(self) -> int:
         return len(self._pending) + int(self._active is not None)
+
+    @property
+    def adapter(self) -> TrAdapter:
+        return self._adapter
 
     def submit(
         self,
@@ -270,6 +278,32 @@ class KiwoomTrRequestQueue:
                     }
                     for index in range(row_count)
                 ]
+                if request.paginate:
+                    active.rows = (active.rows or []) + data
+                    active.page_count += 1
+                    previous_next = str(arguments[4]).strip() if len(arguments) > 4 else "0"
+                    if previous_next == "2":
+                        if active.page_count >= request.max_pages:
+                            raise KiwoomTrError(
+                                f"TR pagination exceeded {request.max_pages} pages"
+                            )
+                        if active.timer is not None:
+                            active.timer.stop()
+                        immediate_result = self._adapter.request_tr(
+                            request.request_name,
+                            request.tr_code,
+                            2,
+                            active.screen_no or "",
+                        )
+                        if immediate_result != 0:
+                            raise KiwoomTrError(
+                                "CommRqData rejected continuation with result "
+                                f"{immediate_result}"
+                            )
+                        if active.timer is not None:
+                            active.timer.start(request.timeout_ms)
+                        return
+                    data = active.rows
             else:
                 data = {
                     field: self._adapter.get_comm_data(

@@ -80,6 +80,22 @@ def render_holdings(value: object) -> list[str]:
     data = value if isinstance(value, dict) else {}
     portfolio = data.get("portfolio", {}) if isinstance(data.get("portfolio"), dict) else {}
     lines = ["", "## 보유종목 종합", ""]
+    if data.get("source") == "kiwoom_accounts":
+        lines.append("- 조회 방식: 로그인 계좌 자동조회 (계좌번호는 마스킹하여 저장)")
+        for account in data.get("accounts", []):
+            if not isinstance(account, dict):
+                continue
+            summary = account.get("summary", {}) if isinstance(account.get("summary"), dict) else {}
+            if account.get("status") == "completed":
+                lines.append(
+                    f"- 계좌 {account.get('account_id')}: {account.get('holding_count', 0)}종목, "
+                    f"평가금액 {quantity(summary.get('market_value'), '원')}, "
+                    f"평가손익 {quantity(summary.get('unrealized_profit'), '원')}"
+                )
+            else:
+                lines.append(f"- 계좌 {account.get('account_id')}: 조회 실패 (다른 계좌 분석은 계속)")
+    elif data.get("source") == "manual_fallback":
+        lines.append("- 조회 방식: 자동 계좌조회 실패로 수동 설정 사용")
     if not data.get("holdings"):
         lines.append("- 등록된 보유종목이 없거나 분석할 수 없습니다.")
     else:

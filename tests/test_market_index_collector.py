@@ -24,10 +24,17 @@ TRADING_DATE = date(2026, 7, 21)
 class FakeRequestQueue:
     def __init__(self) -> None:
         self.requests: list[object] = []
+        self.adapter = FakeLoginAdapter()
 
     def request(self, request: object) -> dict[str, str]:
         self.requests.append(request)
         return {}
+
+
+class FakeLoginAdapter:
+    def get_login_info(self, tag: str) -> str:
+        assert tag == "ACCNO"
+        return ""
 
 
 class FakeMarketIndexDataSource:

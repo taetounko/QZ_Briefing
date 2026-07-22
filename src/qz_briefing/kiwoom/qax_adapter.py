@@ -202,6 +202,13 @@ class KiwoomQAxAdapter:
         """Return the raw reference/previous-close price master value."""
         return self._get_required_master_text("GetMasterLastPrice(QString)", code)
 
+    def get_login_info(self, tag: str) -> str:
+        """Return non-secret login metadata such as the ACCNO account list."""
+        self._ensure_open()
+        return str(
+            self._widget.dynamicCall("GetLoginInfo(QString)", str(tag))
+        ).strip()
+
     def set_input_value(self, item: str, value: str) -> None:
         """Set one input for a subsequent read-only TR request."""
         self._ensure_open()

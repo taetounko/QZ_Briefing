@@ -14,6 +14,9 @@ from .collectors import StockBasicDataSource, normalize_decimal, normalize_integ
 from .leadership import LeadershipDataSource, normalize_history, numeric
 from .models import BriefingContext, BriefingType
 from .technical_indicators import macd_12_26_9, rsi14
+from .accounts import (
+    KiwoomAccountHoldingsSource, consolidate, mask_account, normalize_account_row,
+)
 
 ALLOWED_FIELDS = {
     "code", "name", "quantity", "average_price", "target_price", "stop_price",
@@ -88,33 +91,93 @@ class HoldingsCollector:
         self, config_path: Path, stock_source: StockBasicDataSource,
         daily_source: LeadershipDataSource,
         leadership_codes: Callable[[], set[str]] = set,
+        account_source: KiwoomAccountHoldingsSource | None = None,
         clock: Callable[[], datetime] = datetime.now,
     ) -> None:
         self._config_path, self._stock_source, self._daily_source = config_path, stock_source, daily_source
         self._leadership_codes, self._clock = leadership_codes, clock
+        self._account_source = account_source
 
     def collect(self, context: BriefingContext) -> dict[str, object]:
-        config = load_holdings(self._config_path)
-        items, warnings, errors = [], list(config["warnings"]), list(config["errors"])
-        for holding in config["holdings"]:
+        accounts, warnings, errors = self._load_accounts()
+        if accounts and any(account["status"] == "completed" for account in accounts):
+            source = "kiwoom_accounts"
+            consolidated_result = consolidate(accounts)
+            configured_holdings = [
+                {
+                    "code": item["code"], "name": item["name"],
+                    "quantity": int(item["quantity"]),
+                    "average_price": item["average_price"],
+                    "target_price": None, "stop_price": None,
+                    "maximum_additional_budget": None, "memo": "",
+                    "_account_data": item,
+                }
+                for item in consolidated_result["holdings"]
+            ]
+        else:
+            config = load_holdings(self._config_path)
+            configured_holdings = config["holdings"]
+            warnings.extend(config["warnings"]); errors.extend(config["errors"])
+            source = "manual_fallback" if configured_holdings else "none"
+        items = []
+        for holding in configured_holdings:
             try: items.append(self._analyze_one(holding, context))
             except Exception as exc: errors.append(f"{holding['code']}: {type(exc).__name__}: {exc}")
         investment = sum(float(item["investment_amount"]) for item in items)
         valuation = sum(float(item["valuation_amount"]) for item in items)
+        profit = sum(float(item["profit_loss"]) for item in items)
         return {
-            "collector": self.name, "collected_at": self._clock().isoformat(),
+            "collector": self.name, "collected_at": self._clock().isoformat(), "source": source,
+            "accounts": accounts,
+            "consolidated": consolidated_result if source == "kiwoom_accounts" else {"holding_count": len(items), "total_invested_amount": investment, "total_market_value": valuation, "total_unrealized_profit": valuation - investment, "total_return_rate": ((valuation / investment - 1) * 100 if investment else None), "holdings": items},
             "basis": "latest_close" if context.briefing_type is BriefingType.PRE_MARKET else "current_price",
-            "portfolio": {"investment_amount": investment, "valuation_amount": valuation, "profit_loss": valuation - investment, "profit_rate": (round((valuation / investment - 1) * 100, 6) if investment else None)},
+            "portfolio": {"investment_amount": investment, "valuation_amount": valuation, "profit_loss": profit, "profit_rate": (round(profit / investment * 100, 6) if investment else None)},
             "holdings": items, "warnings": warnings, "errors": errors,
         }
 
+    def _load_accounts(
+        self,
+    ) -> tuple[list[dict[str, object]], list[str], list[str]]:
+        if self._account_source is None:
+            return [], [], []
+        try:
+            account_numbers = self._account_source.accounts()
+        except Exception as exc:
+            return [], [], [f"계좌 목록 조회 실패: {type(exc).__name__}: {exc}"]
+        if not account_numbers:
+            return [], ["로그인 계정에서 조회 가능한 계좌가 없습니다."], []
+        accounts, warnings, errors = [], [], []
+        for account_number in account_numbers:
+            account_id = mask_account(account_number)
+            try:
+                rows = self._account_source.holdings(account_number)
+                normalized = [normalize_account_row(row) for row in rows]
+                account = {"account_id": account_id, "status": "completed", "holding_count": len(normalized), "summary": account_summary(normalized), "holdings": normalized, "warnings": [], "errors": []}
+                accounts.append(account)
+            except Exception as exc:
+                safe_detail = str(exc).replace(account_number, account_id)
+                message = f"{account_id} 잔고 조회 실패: {type(exc).__name__}: {safe_detail}"
+                accounts.append({"account_id": account_id, "status": "failed", "holding_count": 0, "summary": {}, "holdings": [], "warnings": [message], "errors": [message]})
+                warnings.append(message); errors.append(message)
+        if not any(account["status"] == "completed" for account in accounts):
+            warnings.append("모든 자동 계좌조회가 실패하여 수동 설정을 사용합니다.")
+        return accounts, warnings, errors
+
     def _analyze_one(self, holding: dict[str, object], context: BriefingContext) -> dict[str, object]:
-        code = str(holding["code"]); raw = self._stock_source.get_stock_basic_info(code)
-        current = normalize_integer(raw.get("현재가", ""), absolute=True)
+        code = str(holding["code"]); account_data = holding.get("_account_data")
+        raw = account_data.get("raw", {}) if isinstance(account_data, dict) else self._stock_source.get_stock_basic_info(code)
+        current = int(account_data["current_price"]) if isinstance(account_data, dict) and account_data.get("current_price") is not None else normalize_integer(raw.get("현재가", ""), absolute=True)
         if current is None: raise ValueError("현재가가 없습니다")
         quantity, average = int(holding["quantity"]), float(holding["average_price"])
         investment, valuation = quantity * average, quantity * current
-        item = {**holding, "name": raw.get("종목명", "").strip() or holding.get("name"), "current_price": current, "investment_amount": investment, "valuation_amount": valuation, "profit_loss": valuation - investment, "profit_rate": round((current / average - 1) * 100, 6), "target_distance": distance(current, holding.get("target_price")), "stop_distance": distance(current, holding.get("stop_price")), "fees_and_taxes_included": False, "raw": {"basic": raw}, "warnings": []}
+        item = {key: value for key, value in holding.items() if key != "_account_data"}
+        official_investment = account_data.get("invested_amount") if isinstance(account_data, dict) else None
+        official_valuation = account_data.get("market_value") if isinstance(account_data, dict) else None
+        official_profit = account_data.get("unrealized_profit") if isinstance(account_data, dict) else None
+        official_rate = account_data.get("return_rate") if isinstance(account_data, dict) else None
+        investment = float(official_investment) if official_investment is not None else investment
+        valuation = float(official_valuation) if official_valuation is not None else valuation
+        item.update({"name": (account_data.get("name") if isinstance(account_data, dict) else raw.get("종목명", "").strip()) or holding.get("name"), "current_price": current, "investment_amount": investment, "valuation_amount": valuation, "profit_loss": float(official_profit) if official_profit is not None else valuation - investment, "profit_rate": float(official_rate) if official_rate is not None else round((current / average - 1) * 100, 6), "target_distance": distance(current, holding.get("target_price")), "stop_distance": distance(current, holding.get("stop_price")), "valuation_source": "official_account" if isinstance(account_data, dict) else "calculated", "fees_and_taxes_included": False, "raw": {"account_holding": raw} if isinstance(account_data, dict) else {"basic": raw}, "warnings": []})
         try:
             daily = self._daily_source.daily(code, context.trading_date.isoformat())
             history = normalize_history(list(reversed(daily))); item["raw"]["daily_count"] = len(history)
@@ -145,3 +208,10 @@ def distance(current: float, target: object) -> float | None:
 def range_position(current: float, lows: list[float], highs: list[float]) -> float | None:
     if not lows or not highs or max(highs) == min(lows): return None
     return (current - min(lows)) / (max(highs) - min(lows)) * 100
+
+
+def account_summary(holdings: list[dict[str, object]]) -> dict[str, object]:
+    invested = sum(float(item.get("invested_amount") or 0) for item in holdings)
+    market = sum(float(item.get("market_value") or 0) for item in holdings)
+    profit = sum(float(item.get("unrealized_profit") or 0) for item in holdings)
+    return {"invested_amount": invested, "market_value": market, "unrealized_profit": profit, "return_rate": profit / invested * 100 if invested else None}

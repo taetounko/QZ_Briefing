@@ -67,9 +67,9 @@ class FakeTrAdapter:
     def get_repeat_count(self, tr_code: str, request_name: str) -> int:
         return self.repeat_count
 
-    def respond(self, request_index: int = -1) -> None:
+    def respond(self, request_index: int = -1, previous_next: str = "0") -> None:
         request_name, tr_code, _, screen_no = self.requests[request_index]
-        self.listener(screen_no, request_name, tr_code, "주식기본정보")  # type: ignore[operator]
+        self.listener(screen_no, request_name, tr_code, "주식기본정보", previous_next)  # type: ignore[operator]
 
 
 def request(name: str = "stock") -> TrRequest:
@@ -215,3 +215,17 @@ def test_repeated_response_parses_every_official_output_row() -> None:
             {"업종코드": "002", "개인순매수": "2,000"},
         ]
     ]
+
+
+def test_paginated_rows_request_continuation_and_finish_once() -> None:
+    queue, adapter, _ = make_queue()
+    request_value = TrRequest("account", "OPW00018", {}, ("종목번호",), repeat=True, paginate=True)
+    adapter.repeat_count = 1
+    adapter.values[("OPW00018", "account", 0, "종목번호")] = "A005930"
+    results = []
+    queue.submit(request_value, results.append, lambda error: None)
+    adapter.respond(previous_next="2")
+    assert adapter.requests[-1][2] == 2 and results == []
+    adapter.values[("OPW00018", "account", 0, "종목번호")] = "A000660"
+    adapter.respond(request_index=1, previous_next="0")
+    assert results == [[{"종목번호": "A005930"}, {"종목번호": "A000660"}]]
