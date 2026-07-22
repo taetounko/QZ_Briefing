@@ -95,11 +95,13 @@ def test_cli_configure_and_disable_never_put_token_in_json(tmp_path):
     class CliAdapter:
         def __init__(self,token,chat): made.append((token,chat))
         def send_text(self,*args,**kwargs): pass
-    options=SimpleNamespace(configure_telegram=True,disable_telegram=False,test_notification=False,remove_secret=False)
-    assert handle_notification_cli(options,tmp_path,input_secret=lambda prompt:"BOT_SECRET",input_text=lambda prompt:"1234567890",adapter_factory=CliAdapter,secret_store_factory=SecretStore)==0
+    secrets=iter(("BOT_SECRET", "1234567890"))
+    options=SimpleNamespace(configure_telegram=True,disable_telegram=False,test_notification=False,notification_status=False,remove_secret=False)
+    assert handle_notification_cli(options,tmp_path,input_secret=lambda prompt:next(secrets),adapter_factory=CliAdapter,secret_store_factory=SecretStore)==0
     config=(tmp_path/"config"/"notifications.json").read_text()
-    assert "BOT_SECRET" not in config and json.loads(config)["telegram"]["enabled"]
-    options=SimpleNamespace(configure_telegram=False,disable_telegram=True,test_notification=False,remove_secret=True)
+    assert "BOT_SECRET" not in config and "1234567890" not in config and json.loads(config)["telegram"]["enabled"]
+    assert json.loads(SecretStore.value) == {"token":"BOT_SECRET", "chat_id":"1234567890"}
+    options=SimpleNamespace(configure_telegram=False,disable_telegram=True,test_notification=False,notification_status=False,remove_secret=True)
     handle_notification_cli(options,tmp_path,secret_store_factory=SecretStore)
     assert SecretStore.removed and not json.loads((tmp_path/"config"/"notifications.json").read_text())["telegram"]["enabled"]
 
@@ -108,4 +110,29 @@ def test_cli_parsing_and_chat_mask():
     assert parse_cli_arguments(["--configure-telegram"]).configure_telegram
     assert parse_cli_arguments(["--disable-telegram"]).disable_telegram
     assert parse_cli_arguments(["--test-notification"]).test_notification
+    assert parse_cli_arguments(["--notification-status"]).notification_status
     assert mask_chat_id("1234567890")=="******7890"
+
+
+def test_cli_test_records_delivery_and_status_hides_credentials(tmp_path, capsys):
+    (tmp_path/"config").mkdir()
+    (tmp_path/"config"/"notifications.json").write_text(
+        json.dumps({"telegram":{"enabled":True}}), encoding="utf-8"
+    )
+    SecretStore.value=json.dumps({"token":"BOT_SECRET", "chat_id":"1234567890"})
+
+    class CliAdapter:
+        def __init__(self, token, chat): assert (token, chat)==("BOT_SECRET", "1234567890")
+        def send_text(self, *args, **kwargs): pass
+
+    options=SimpleNamespace(configure_telegram=False,disable_telegram=False,test_notification=True,notification_status=False,remove_secret=False)
+    assert handle_notification_cli(options,tmp_path,adapter_factory=CliAdapter,secret_store_factory=SecretStore)==0
+    history=json.loads((tmp_path/"data"/"runtime"/"notification_delivery_history.json").read_text(encoding="utf-8"))
+    assert history[-1]["event_type"]=="test_notification"
+
+    options=SimpleNamespace(configure_telegram=False,disable_telegram=False,test_notification=False,notification_status=True,remove_secret=False)
+    assert handle_notification_cli(options,tmp_path,secret_store_factory=SecretStore)==0
+    output=capsys.readouterr().out
+    assert "DPAPI credentials restored: True" in output
+    assert "Pending messages: 0" in output
+    assert "BOT_SECRET" not in output and "1234567890" not in output

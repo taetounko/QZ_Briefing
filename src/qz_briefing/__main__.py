@@ -124,6 +124,7 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     commands.add_argument("--configure-telegram", action="store_true")
     commands.add_argument("--disable-telegram", action="store_true")
     commands.add_argument("--test-notification", action="store_true")
+    commands.add_argument("--notification-status", action="store_true")
     parser.add_argument("--remove-secret", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(raw)
     if parsed.remove_secret and not parsed.disable_telegram:
@@ -143,6 +144,31 @@ def load_notification_config(path: Path) -> dict[str, object]:
         return {}
 
 
+def load_telegram_credentials(store: object, legacy_chat_id: str = "") -> tuple[str, str]:
+    """Load the DPAPI payload, accepting the original token-only format."""
+    plaintext = store.load()
+    try:
+        payload = json.loads(plaintext)
+    except (TypeError, ValueError):
+        return str(plaintext), legacy_chat_id
+    if not isinstance(payload, dict):
+        return str(plaintext), legacy_chat_id
+    return str(payload.get("token", "")), str(payload.get("chat_id", ""))
+
+
+def record_manual_notification_delivery(project_root: Path, event_type: str) -> None:
+    history_path = project_root / "data" / "runtime" / "notification_delivery_history.json"
+    try:
+        history = json.loads(history_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        history = []
+    if not isinstance(history, list):
+        history = []
+    delivered_at = datetime.now().isoformat()
+    history.append({"key": f"manual_test|{delivered_at}", "delivered_at": delivered_at, "event_type": event_type})
+    atomic_write_json(history_path, history)
+
+
 def create_notification_service(project_root: Path, data_root: Path, timer_factory=None):
     config = load_notification_config(project_root / "config" / "notifications.json")
     telegram = config.get("telegram") if isinstance(config.get("telegram"), dict) else {}
@@ -150,8 +176,11 @@ def create_notification_service(project_root: Path, data_root: Path, timer_facto
         print("Telegram notifications disabled", flush=True)
         return DisabledNotificationService()
     try:
-        token = DpapiSecretStore(project_root / "config" / "telegram_token.dpapi").load()
-        adapter = TelegramAdapter(token, str(telegram.get("chat_id", "")))
+        token, chat_id = load_telegram_credentials(
+            DpapiSecretStore(project_root / "config" / "telegram_token.dpapi"),
+            str(telegram.get("chat_id", "")),
+        )
+        adapter = TelegramAdapter(token, chat_id)
         return NotificationService(
             adapter, PersistentNotificationQueue(data_root / "runtime" / "notification_queue.json"),
             data_root / "runtime" / "notification_delivery_history.json",
@@ -167,7 +196,7 @@ def create_notification_service(project_root: Path, data_root: Path, timer_facto
 
 
 def handle_notification_cli(options: argparse.Namespace, project_root: Path, *, input_secret=getpass.getpass, input_text=input, adapter_factory=TelegramAdapter, secret_store_factory=DpapiSecretStore) -> int | None:
-    if not (options.configure_telegram or options.disable_telegram or options.test_notification):
+    if not (options.configure_telegram or options.disable_telegram or options.test_notification or options.notification_status):
         return None
     config_path = project_root / "config" / "notifications.json"; secret_path = project_root / "config" / "telegram_token.dpapi"
     config = load_notification_config(config_path); telegram = config.get("telegram") if isinstance(config.get("telegram"), dict) else {}
@@ -176,12 +205,36 @@ def handle_notification_cli(options: argparse.Namespace, project_root: Path, *, 
         if options.remove_secret: secret_store_factory(secret_path).remove()
         print("Telegram notifications disabled", flush=True); return 0
     if options.configure_telegram:
-        token = input_secret("Telegram Bot Token: "); chat_id = input_text("Telegram Chat ID: ").strip()
+        token = input_secret("Telegram Bot Token (hidden): "); chat_id = input_secret("Telegram Chat ID (hidden): ").strip()
         adapter_factory(token, chat_id).send_text("QZ Briefing Telegram 연결 테스트", parse_mode=None)
-        secret_store_factory(secret_path).save(token)
-        telegram = {**telegram, "enabled": True, "chat_id": chat_id, "send_markdown_file": telegram.get("send_markdown_file", True), "send_json_file": telegram.get("send_json_file", False), "send_runtime_alerts": telegram.get("send_runtime_alerts", True), "send_daily_summary": telegram.get("send_daily_summary", True)}
-        atomic_write_json(config_path, {"telegram": telegram}); print(f"Telegram configured: chat={mask_chat_id(chat_id)}", flush=True); return 0
-    token = secret_store_factory(secret_path).load(); chat_id = str(telegram.get("chat_id", "")); adapter_factory(token, chat_id).send_text("QZ Briefing 테스트 알림", parse_mode=None); print(f"Test notification sent: chat={mask_chat_id(chat_id)}", flush=True); return 0
+        secret_store_factory(secret_path).save(json.dumps({"token": token, "chat_id": chat_id}, ensure_ascii=False))
+        telegram = {key: value for key, value in telegram.items() if key != "chat_id"}
+        telegram = {**telegram, "enabled": True, "send_markdown_file": telegram.get("send_markdown_file", True), "send_json_file": telegram.get("send_json_file", False), "send_runtime_alerts": telegram.get("send_runtime_alerts", True), "send_daily_summary": telegram.get("send_daily_summary", True)}
+        atomic_write_json(config_path, {"telegram": telegram})
+        record_manual_notification_delivery(project_root, "configuration_test")
+        print(f"Telegram configured: chat={mask_chat_id(chat_id)}", flush=True); return 0
+    token, chat_id = load_telegram_credentials(secret_store_factory(secret_path), str(telegram.get("chat_id", "")))
+    runtime_root = project_root / "data" / "runtime"
+    history_path = runtime_root / "notification_delivery_history.json"
+    queue_path = runtime_root / "notification_queue.json"
+    if options.notification_status:
+        try: history = json.loads(history_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError): history = []
+        try: pending = json.loads(queue_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError): pending = []
+        last = history[-1] if isinstance(history, list) and history else {}
+        failures = [item for item in pending if isinstance(item, dict) and item.get("last_error")] if isinstance(pending, list) else []
+        print(f"Telegram enabled: {bool(telegram.get('enabled'))}", flush=True)
+        print(f"DPAPI credentials restored: {bool(token and chat_id)}", flush=True)
+        print(f"Chat: {mask_chat_id(chat_id)}", flush=True)
+        print(f"Last success: {last.get('delivered_at') or 'none'}", flush=True)
+        print(f"Pending messages: {len(pending) if isinstance(pending, list) else 0}", flush=True)
+        print(f"Last failure: {(failures[-1].get('last_error') if failures else None) or 'none'}", flush=True)
+        print(f"Delivery history entries: {len(history) if isinstance(history, list) else 0}", flush=True)
+        return 0
+    adapter_factory(token, chat_id).send_text("QZ Briefing 테스트 알림", parse_mode=None)
+    record_manual_notification_delivery(project_root, "test_notification")
+    print(f"Test notification sent: chat={mask_chat_id(chat_id)}", flush=True); return 0
 
 
 def check_market_day(target_date: date) -> TradingDayResult:
