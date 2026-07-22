@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 from datetime import date, datetime
+import pytest
 
 from qz_briefing.briefing.leadership import (
     KiwoomLeadershipCollector, KiwoomLeadershipDataSource, merge_rankings,
@@ -26,6 +27,32 @@ def test_official_candidate_and_daily_requests() -> None:
     assert queue.requests[1].inputs["시장구분"] == "101"
     assert queue.requests[2].inputs == {"시장구분": "001", "관리종목포함": "0", "거래소구분": ""}
     assert queue.requests[3].inputs == {"종목코드": "005930", "기준일자": "20260721", "수정주가구분": "1"}
+
+
+def test_daily_cache_is_shared_for_date_and_refreshes_next_day() -> None:
+    queue = Queue(); source = KiwoomLeadershipDataSource(queue)
+    first = source.daily("005930", "2026-07-21")
+    assert source.daily("005930", "2026-07-21") is first
+    source.daily("005930", "2026-07-22")
+    assert len(queue.requests) == 2
+    source.begin_briefing_run()
+    source.daily("005930", "2026-07-22")
+    assert len(queue.requests) == 3
+
+
+def test_failed_daily_result_is_not_cached() -> None:
+    class FailingOnceQueue(Queue):
+        def request_rows(self, request):
+            self.requests.append(request)
+            if len(self.requests) == 1:
+                raise RuntimeError("temporary")
+            return [{"종목코드": "005930"}]
+
+    queue = FailingOnceQueue(); source = KiwoomLeadershipDataSource(queue)
+    with pytest.raises(RuntimeError):
+        source.daily("005930", "2026-07-21")
+    assert source.daily("005930", "2026-07-21") == [{"종목코드": "005930"}]
+    assert len(queue.requests) == 2
 
 
 def test_duplicate_codes_merge_and_preserve_source_ranks() -> None:

@@ -47,9 +47,9 @@ class StockSource:
 
 
 class DailySource:
-    def __init__(self, fail=False): self.fail = fail
+    def __init__(self, fail=False, fail_code=None): self.fail, self.fail_code = fail, fail_code
     def daily(self, code, target_date):
-        if self.fail: raise RuntimeError("daily failed")
+        if self.fail or code == self.fail_code: raise RuntimeError("daily failed")
         chronological = [{"일자": str(i), "현재가": str(61 + i), "시가": str(60 + i), "고가": str(63 + i), "저가": str(59 + i), "거래량": "2000" if i == 59 else "1000"} for i in range(60)]
         return list(reversed(chronological))
 
@@ -85,6 +85,17 @@ def test_one_holding_failure_does_not_stop_next(tmp_path: Path) -> None:
     path = tmp_path / "holdings.json"; write_config(path, [VALID, {**VALID, "code": "000660", "name": "SK하이닉스"}])
     result = HoldingsCollector(path, StockSource(fail_code="005930"), DailySource()).collect(context())
     assert len(result["holdings"]) == 1 and result["errors"]
+
+
+def test_one_daily_failure_does_not_stop_next_technical_analysis(tmp_path: Path) -> None:
+    path = tmp_path / "holdings.json"
+    write_config(path, [VALID, {**VALID, "code": "000660", "name": "SK하이닉스"}])
+    result = HoldingsCollector(path, StockSource(), DailySource(fail_code="005930")).collect(context())
+    by_code = {item["code"]: item for item in result["holdings"]}
+    assert by_code["005930"]["trend"] == "insufficient_data"
+    assert by_code["000660"]["trend"] != "insufficient_data"
+    assert by_code["000660"]["bottom_confirmation"] != "insufficient_data"
+    assert by_code["000660"]["review_status"] != "insufficient_data"
 
 
 def test_trend_and_bottom_states() -> None:

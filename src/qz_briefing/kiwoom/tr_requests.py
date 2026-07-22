@@ -6,6 +6,8 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+import logging
+import time
 from typing import Protocol, TypeAlias
 
 
@@ -19,6 +21,15 @@ class KiwoomTrTimeoutError(KiwoomTrError):
 
 class KiwoomTrClosedError(KiwoomTrError):
     pass
+
+
+# The installed local ENC/legend files do not publish a numeric rate limit.
+# Use a conservative, configurable process-wide operating default.
+DEFAULT_TR_INTERVAL_MS = 1_000
+DEFAULT_OVERLOAD_BACKOFF_MS = (3_000, 7_000, 15_000)
+OVERLOAD_ERROR_CODE = -200
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SignalLike(Protocol):
@@ -93,6 +104,9 @@ class _QueuedRequest:
     timer: TimerLike | None = None
     rows: list[dict[str, str]] | None = None
     page_count: int = 0
+    dispatch_timer: TimerLike | None = None
+    retry_count: int = 0
+    previous_next: int = 0
 
 
 class ScreenNumberPool:
@@ -127,11 +141,18 @@ class KiwoomTrRequestQueue:
         timer_factory: Callable[[], TimerLike] = create_timer,
         event_loop_factory: Callable[[], EventLoopLike] = create_event_loop,
         screen_pool: ScreenNumberPool | None = None,
+        minimum_interval_ms: int = DEFAULT_TR_INTERVAL_MS,
+        overload_backoff_ms: tuple[int, ...] = DEFAULT_OVERLOAD_BACKOFF_MS,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._adapter = adapter
         self._timer_factory = timer_factory
         self._event_loop_factory = event_loop_factory
         self._screen_pool = screen_pool or ScreenNumberPool()
+        self._minimum_interval_ms = max(0, minimum_interval_ms)
+        self._overload_backoff_ms = overload_backoff_ms
+        self._monotonic = monotonic
+        self._last_dispatch_at: float | None = None
         self._pending: deque[_QueuedRequest] = deque()
         self._active: _QueuedRequest | None = None
         self._closed = False
@@ -154,6 +175,12 @@ class KiwoomTrRequestQueue:
         if self._closed:
             raise KiwoomTrClosedError("TR request queue is closed")
         self._pending.append(_QueuedRequest(request, on_success, on_error))
+        estimated_ms = max(0, (self.pending_count - 1) * self._minimum_interval_ms)
+        LOGGER.info(
+            "TR request queued: pending=%d estimated minimum wait=%dms",
+            self.pending_count,
+            estimated_ms,
+        )
         self._start_next()
 
     def request(self, request: TrRequest) -> dict[str, str]:
@@ -233,24 +260,73 @@ class KiwoomTrRequestQueue:
             queued.screen_no = self._screen_pool.acquire()
             for item, value in queued.request.inputs.items():
                 self._adapter.set_input_value(item, value)
+            self._schedule_dispatch(queued, requested_delay_ms=0)
+        except Exception as exc:
+            self._finish_error(exc)
+
+    def _schedule_dispatch(
+        self, queued: _QueuedRequest, *, requested_delay_ms: int
+    ) -> None:
+        if self._closed or self._active is not queued:
+            return
+        interval_delay = 0
+        if self._last_dispatch_at is not None:
+            elapsed_ms = (self._monotonic() - self._last_dispatch_at) * 1_000
+            interval_delay = max(0, int(self._minimum_interval_ms - elapsed_ms + 0.999))
+        delay_ms = max(requested_delay_ms, interval_delay)
+        if delay_ms <= 0:
+            self._dispatch(queued)
+            return
+        timer = self._timer_factory()
+        queued.dispatch_timer = timer
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda queued=queued: self._dispatch(queued))
+        timer.start(delay_ms)
+
+    def _dispatch(self, queued: _QueuedRequest) -> None:
+        if self._closed or self._active is not queued:
+            return
+        if queued.dispatch_timer is not None:
+            queued.dispatch_timer.stop()
+            queued.dispatch_timer = None
+        self._last_dispatch_at = self._monotonic()
+        result = self._adapter.request_tr(
+            queued.request.request_name,
+            queued.request.tr_code,
+            queued.previous_next,
+            queued.screen_no or "",
+        )
+        if result == OVERLOAD_ERROR_CODE:
+            LOGGER.warning("TR overload detected: %s", queued.request.request_name)
+            if queued.retry_count >= len(self._overload_backoff_ms):
+                LOGGER.error("TR retry exhausted: %s", queued.request.request_name)
+                self._finish_error(KiwoomTrError(
+                    f"CommRqData rejected request with result {result} after retries"
+                ))
+                return
+            delay_ms = self._overload_backoff_ms[queued.retry_count]
+            queued.retry_count += 1
+            LOGGER.warning(
+                "TR retry scheduled: %s attempt=%d delay=%dms",
+                queued.request.request_name,
+                queued.retry_count,
+                delay_ms,
+            )
+            self._schedule_dispatch(queued, requested_delay_ms=delay_ms)
+            return
+        if result != 0:
+            self._finish_error(KiwoomTrError(
+                f"CommRqData rejected request with result {result}"
+            ))
+            return
+        timer = queued.timer
+        if timer is None:
             timer = self._timer_factory()
             queued.timer = timer
             timer.setSingleShot(True)
             timer.timeout.connect(lambda queued=queued: self._handle_timeout(queued))
-            immediate_result = self._adapter.request_tr(
-                queued.request.request_name,
-                queued.request.tr_code,
-                0,
-                queued.screen_no,
-            )
-            if immediate_result != 0:
-                raise KiwoomTrError(
-                    f"CommRqData rejected request with result {immediate_result}"
-                )
-            if self._active is queued:
-                timer.start(queued.request.timeout_ms)
-        except Exception as exc:
-            self._finish_error(exc)
+        if self._active is queued:
+            timer.start(queued.request.timeout_ms)
 
     def _handle_tr_data(self, *arguments: object) -> None:
         active = self._active
@@ -289,19 +365,9 @@ class KiwoomTrRequestQueue:
                             )
                         if active.timer is not None:
                             active.timer.stop()
-                        immediate_result = self._adapter.request_tr(
-                            request.request_name,
-                            request.tr_code,
-                            2,
-                            active.screen_no or "",
-                        )
-                        if immediate_result != 0:
-                            raise KiwoomTrError(
-                                "CommRqData rejected continuation with result "
-                                f"{immediate_result}"
-                            )
-                        if active.timer is not None:
-                            active.timer.start(request.timeout_ms)
+                        active.previous_next = 2
+                        active.retry_count = 0
+                        self._schedule_dispatch(active, requested_delay_ms=0)
                         return
                     data = active.rows
             else:
@@ -354,5 +420,7 @@ class KiwoomTrRequestQueue:
     def _cleanup(self, queued: _QueuedRequest) -> None:
         if queued.timer is not None:
             queued.timer.stop()
+        if queued.dispatch_timer is not None:
+            queued.dispatch_timer.stop()
         if queued.screen_no is not None:
             self._screen_pool.release(queued.screen_no)

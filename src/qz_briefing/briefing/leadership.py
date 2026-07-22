@@ -35,6 +35,11 @@ class LeadershipDataSource(Protocol):
 class KiwoomLeadershipDataSource:
     def __init__(self, queue: KiwoomTrRequestQueue) -> None:
         self._tr_queue = queue
+        self._daily_cache: dict[tuple[str, str, str, str], list[dict[str, str]]] = {}
+
+    def begin_briefing_run(self) -> None:
+        """Keep successful daily rows only for one briefing collector pass."""
+        self._daily_cache.clear()
 
     def ranking(self, tr_code: str, market_code: str) -> list[dict[str, str]]:
         requests = {
@@ -48,11 +53,18 @@ class KiwoomLeadershipDataSource:
         ))
 
     def daily(self, code: str, target_date: str) -> list[dict[str, str]]:
-        return self._tr_queue.request_rows(TrRequest(
+        normalized_date = target_date.replace("-", "")
+        cache_key = (normalized_date, "OPT10081", code, "1")
+        cached = self._daily_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        rows = self._tr_queue.request_rows(TrRequest(
             request_name=f"qz_leadership_daily_{code}", tr_code="OPT10081",
-            inputs={"종목코드": code, "기준일자": target_date.replace("-", ""), "수정주가구분": "1"},
+            inputs={"종목코드": code, "기준일자": normalized_date, "수정주가구분": "1"},
             output_fields=DAILY_FIELDS, repeat=True,
         ))
+        self._daily_cache[cache_key] = rows
+        return rows
 
 
 def merge_rankings(groups: list[list[dict[str, str]]]) -> dict[str, dict[str, object]]:
@@ -123,6 +135,9 @@ class KiwoomLeadershipCollector:
         self._data_source, self._clock, self._on_selected = source, clock, on_selected
 
     def collect(self, context: BriefingContext) -> dict[str, object]:
+        begin_run = getattr(self._data_source, "begin_briefing_run", None)
+        if callable(begin_run):
+            begin_run()
         markets: dict[str, list[dict[str, object]]] = {}; rebounds: list[dict[str, object]] = []; errors = []
         warnings = [
             "ETF·ETN은 공식 종목조건 16으로 제외합니다. 관리종목·우선주·스팩 등은 모든 후보 TR에서 동시에 검증할 수 없어 추가 확인이 필요합니다."

@@ -46,6 +46,7 @@ class FakeTrAdapter:
         self.requests: list[tuple[str, str, int, str]] = []
         self.values: dict[tuple[str, str, int, str], str] = {}
         self.repeat_count = 0
+        self.request_results: list[int] = []
 
     def add_tr_data_listener(self, callback: object) -> None:
         self.listener = callback
@@ -57,7 +58,7 @@ class FakeTrAdapter:
         self, request_name: str, tr_code: str, previous_next: int, screen_no: str
     ) -> int:
         self.requests.append((request_name, tr_code, previous_next, screen_no))
-        return 0
+        return self.request_results.pop(0) if self.request_results else 0
 
     def get_comm_data(
         self, tr_code: str, request_name: str, index: int, item_name: str
@@ -82,7 +83,7 @@ def request(name: str = "stock") -> TrRequest:
     )
 
 
-def make_queue():
+def make_queue(*, minimum_interval_ms=0, overload_backoff_ms=(3000, 7000, 15000), monotonic=lambda: 0.0):
     adapter = FakeTrAdapter()
     timers: list[FakeTimer] = []
 
@@ -91,7 +92,13 @@ def make_queue():
         timers.append(timer)
         return timer
 
-    queue = KiwoomTrRequestQueue(adapter, timer_factory=timer_factory)
+    queue = KiwoomTrRequestQueue(
+        adapter,
+        timer_factory=timer_factory,
+        minimum_interval_ms=minimum_interval_ms,
+        overload_backoff_ms=overload_backoff_ms,
+        monotonic=monotonic,
+    )
     return queue, adapter, timers
 
 
@@ -229,3 +236,73 @@ def test_paginated_rows_request_continuation_and_finish_once() -> None:
     adapter.values[("OPW00018", "account", 0, "종목번호")] = "A000660"
     adapter.respond(request_index=1, previous_next="0")
     assert results == [[{"종목번호": "A005930"}, {"종목번호": "A000660"}]]
+
+
+def test_first_request_is_immediate_and_next_waits_for_global_interval() -> None:
+    now = [0.0]
+    queue, adapter, timers = make_queue(minimum_interval_ms=1000, monotonic=lambda: now[0])
+    queue.submit(request("first"), lambda data: None, lambda error: None)
+    assert [item[0] for item in adapter.requests] == ["first"]
+    adapter.values.update({("OPT10001", "first", 0, "현재가"): "1", ("OPT10001", "first", 0, "등락율"): "0"})
+    adapter.respond()
+    queue.submit(request("second"), lambda data: None, lambda error: None)
+    assert [item[0] for item in adapter.requests] == ["first"]
+    assert timers[-1].started_with == 1000
+    now[0] = 1.0; timers[-1].timeout.emit()
+    assert [item[0] for item in adapter.requests] == ["first", "second"]
+
+
+def test_overload_retries_with_three_backoffs_then_succeeds() -> None:
+    queue, adapter, timers = make_queue()
+    adapter.request_results = [-200, -200, -200, 0]
+    results = []
+    queue.submit(request(), results.append, lambda error: None)
+    for expected in (3000, 7000, 15000):
+        assert timers[-1].started_with == expected
+        timers[-1].timeout.emit()
+    assert len(adapter.requests) == 4
+    adapter.values = {("OPT10001", "stock", 0, "현재가"): "1", ("OPT10001", "stock", 0, "등락율"): "0"}
+    adapter.respond()
+    assert len(results) == 1
+
+
+def test_overload_exhaustion_and_non_overload_no_retry() -> None:
+    queue, adapter, timers = make_queue()
+    adapter.request_results = [-200, -200, -200, -200]
+    errors = []
+    queue.submit(request(), lambda data: None, errors.append)
+    for expected in (3000, 7000, 15000):
+        assert timers[-1].started_with == expected
+        timers[-1].timeout.emit()
+    assert len(errors) == 1 and len(adapter.requests) == 4
+
+    queue2, adapter2, timers2 = make_queue()
+    adapter2.request_results = [-201]
+    errors2 = []
+    queue2.submit(request(), lambda data: None, errors2.append)
+    assert len(errors2) == 1 and len(adapter2.requests) == 1 and timers2 == []
+
+
+def test_retry_preserves_order_and_shutdown_cancels_retry() -> None:
+    queue, adapter, timers = make_queue()
+    adapter.request_results = [-200]
+    errors = []
+    queue.submit(request("first"), lambda data: None, errors.append)
+    queue.submit(request("second"), lambda data: None, errors.append)
+    retry_timer = timers[-1]
+    assert [item[0] for item in adapter.requests] == ["first"]
+    queue.close(); retry_timer.timeout.emit()
+    assert retry_timer.stop_count >= 1
+    assert [item[0] for item in adapter.requests] == ["first"] and len(errors) == 2
+
+
+def test_shutdown_cancels_global_interval_timer() -> None:
+    queue, adapter, timers = make_queue(minimum_interval_ms=1000)
+    adapter.values = {("OPT10001", "first", 0, "현재가"): "1", ("OPT10001", "first", 0, "등락율"): "0"}
+    queue.submit(request("first"), lambda data: None, lambda error: None); adapter.respond()
+    errors = []
+    queue.submit(request("second"), lambda data: None, errors.append)
+    interval_timer = timers[-1]
+    queue.close(); interval_timer.timeout.emit()
+    assert interval_timer.stop_count >= 1
+    assert [item[0] for item in adapter.requests] == ["first"] and len(errors) == 1
