@@ -27,9 +27,9 @@ def test_task_name_is_declared_in_both_scripts() -> None:
     assert expected in _read_script(UNINSTALL_SCRIPT)
 
 
-def test_install_script_uses_daily_8_am_trigger() -> None:
+def test_install_script_uses_daily_730_am_trigger() -> None:
     content = _read_script(INSTALL_SCRIPT)
-    assert "New-ScheduledTaskTrigger -Daily -At \"06:50\"" in content
+    assert "New-ScheduledTaskTrigger -Daily -At \"07:30\"" in content
     assert "-MultipleInstances IgnoreNew" in content
 
 
@@ -54,8 +54,8 @@ def test_install_script_uses_current_user_interactive_principal() -> None:
     assert "-LogonType Interactive" in content
 
 
-def test_install_script_requires_network_availability() -> None:
-    assert "-RunOnlyIfNetworkAvailable" in _read_script(INSTALL_SCRIPT)
+def test_install_script_does_not_block_on_network_availability() -> None:
+    assert "-RunOnlyIfNetworkAvailable" not in _read_script(INSTALL_SCRIPT)
 
 
 def test_install_script_allows_battery_operation() -> None:

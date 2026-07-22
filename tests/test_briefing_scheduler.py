@@ -6,6 +6,7 @@ from qz_briefing.scheduling.briefing_scheduler import (
     INTRADAY_10AM,
     MARKET_CLOSE,
     PRE_MARKET,
+    PREOPEN_MONITORING,
     BriefingScheduler,
     briefing_plan,
 )
@@ -40,25 +41,26 @@ class FakeTimer:
         self.stop_count += 1
 
 
-def test_before_8_am_schedules_pre_market_10_am_and_market_close() -> None:
+def test_before_8_am_schedules_monitoring_9am_10am_and_market_close() -> None:
     plan = briefing_plan(datetime(2026, 7, 20, 7, 30))
     assert [(item.name, item.run_immediately, item.delay_ms) for item in plan] == [
-        (PRE_MARKET, False, 30 * 60 * 1000),
+        (PREOPEN_MONITORING, False, 30 * 60 * 1000),
+        (PRE_MARKET, False, 90 * 60 * 1000),
         (INTRADAY_10AM, False, 150 * 60 * 1000),
         (MARKET_CLOSE, False, 490 * 60 * 1000),
     ]
 
 
-def test_at_8_am_runs_pre_market_now_and_schedules_10_am() -> None:
+def test_at_8_am_starts_monitoring_and_schedules_9am_briefing() -> None:
     plan = briefing_plan(datetime(2026, 7, 20, 8, 0))
-    assert plan[0].name == PRE_MARKET
+    assert plan[0].name == PREOPEN_MONITORING
     assert plan[0].run_immediately
-    assert plan[1].name == INTRADAY_10AM
+    assert plan[1].name == PRE_MARKET
     assert not plan[1].run_immediately
-    assert plan[1].delay_ms == 2 * 60 * 60 * 1000
+    assert plan[1].delay_ms == 60 * 60 * 1000
 
 
-def test_between_8_and_10_runs_pre_market_immediately() -> None:
+def test_between_9_and_10_runs_pre_market_immediately() -> None:
     plan = briefing_plan(datetime(2026, 7, 20, 9, 59, 59))
     assert plan[0].name == PRE_MARKET
     assert plan[0].run_immediately
@@ -94,17 +96,18 @@ def test_scheduler_prevents_duplicate_execution_for_same_day_and_name() -> None:
 
     scheduler = BriefingScheduler(
         {
+            PREOPEN_MONITORING: lambda: calls.append(PREOPEN_MONITORING),
             PRE_MARKET: lambda: calls.append(PRE_MARKET),
             INTRADAY_10AM: lambda: calls.append(INTRADAY_10AM),
         },
         timer_factory=make_timer,
     )
-    scheduler.schedule(datetime(2026, 7, 20, 7, 30))
+    scheduler.schedule(datetime(2026, 7, 20, 8, 30))
 
     timers[0].timeout.emit()
     timers[0].timeout.emit()
 
-    assert calls == [PRE_MARKET]
+    assert calls == [PREOPEN_MONITORING, PRE_MARKET]
 
 
 def test_stop_cancels_all_scheduled_timers() -> None:
@@ -123,8 +126,8 @@ def test_stop_cancels_all_scheduled_timers() -> None:
     scheduler.stop()
     scheduler.stop()
 
-    assert len(timers) == 3
-    assert [timer.stop_count for timer in timers] == [1, 1, 1]
+    assert len(timers) == 4
+    assert [timer.stop_count for timer in timers] == [1, 1, 1, 1]
 
 
 def test_injected_callback_runs_for_intraday_task() -> None:

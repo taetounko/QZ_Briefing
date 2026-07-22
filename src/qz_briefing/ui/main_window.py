@@ -132,7 +132,7 @@ class DashboardMainWindow(QMainWindow):
         now = self._clock(); connection = self._connection_state()
         self._status_labels["connection"].setText(status_label(getattr(connection, "name", connection)))
         self._status_labels["calendar"].setText(self._trading_day_status); self._status_labels["clock"].setText(now.strftime("%H:%M:%S"))
-        schedule = [(8, 0, "장전"), (10, 0, "10시"), (15, 40, "장마감")]
+        schedule = [(8, 0, "장전 감시"), (9, 0, "장전 브리핑"), (10, 0, "10시 브리핑"), (15, 40, "장마감 브리핑")]
         self._status_labels["next"].setText(next((f"{hour:02d}:{minute:02d} {name}" for hour, minute, name in schedule if (now.hour, now.minute) < (hour, minute)), "오늘 일정 완료"))
         self._status_labels["shutdown"].setText("20:00")
 

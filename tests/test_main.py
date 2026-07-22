@@ -311,6 +311,7 @@ class MainEntryPointTests(unittest.TestCase):
             lock_factory=FakeProcessLock,
             briefing_scheduler_factory=ImmediateBriefingScheduler,
             briefing_pipeline_factory=lambda clock, adapter: pipeline,
+            clock=lambda: datetime(2026, 7, 20, 9, 5),
         )
 
         self.assertEqual(exit_code, 0)

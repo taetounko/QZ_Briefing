@@ -24,7 +24,7 @@ from .renderer import render_markdown
 from .storage import BriefingStorage
 
 
-FINAL_STATUSES = {"completed", "completed_with_errors"}
+FINAL_STATUSES = {"completed", "completed_with_errors", "no_market_open"}
 LOGGER = logging.getLogger(__name__)
 
 
@@ -35,10 +35,12 @@ class DailyBriefingPipeline:
         collectors: Sequence[BriefingCollector],
         *,
         clock: Callable[[], datetime] = datetime.now,
+        preopen_monitoring: Callable[[], dict[str, object]] | None = None,
     ) -> None:
         self._storage = storage
         self._collectors = tuple(collectors)
         self._clock = clock
+        self._preopen_monitoring = preopen_monitoring
         self._in_progress: set[tuple[date, BriefingType, bool]] = set()
         self._completed: set[tuple[date, BriefingType]] = set()
         self._completion_listeners: list[Callable[[str, str], None]] = []
@@ -50,6 +52,11 @@ class DailyBriefingPipeline:
     def add_completion_listener(self, listener: Callable[[str, str], None]) -> None:
         if listener not in self._completion_listeners:
             self._completion_listeners.append(listener)
+
+    def set_preopen_monitoring_provider(
+        self, provider: Callable[[], dict[str, object]]
+    ) -> None:
+        self._preopen_monitoring = provider
 
     def run(
         self,
@@ -94,11 +101,22 @@ class DailyBriefingPipeline:
                     "장 종료 전 수동 검증 결과이며 실제 장마감 데이터가 아닙니다."
                 )
 
+            monitoring = None
+            if self._preopen_monitoring is not None:
+                monitoring = self._preopen_monitoring()
+            no_market_open = bool(
+                monitoring
+                and not monitoring.get("market_open_detected")
+                and context.started_at.time() >= time(9, 5)
+            )
+            if no_market_open:
+                context.warnings.append("공식 시장 개시 신호가 확인되지 않았습니다.")
+
             log_name = f"{briefing_type.value} validation" if manual_validation else briefing_type.value
             print(f"briefing pipeline started: {log_name}", flush=True)
             prior_pre_market = self._load_pre_market(context)
             collector_results: dict[str, dict[str, object]] = {}
-            for collector in self._collectors:
+            for collector in (() if no_market_open else self._collectors):
                 print(f"briefing collector started: {collector.name}", flush=True)
                 try:
                     data = collector.collect(context)
@@ -129,7 +147,9 @@ class DailyBriefingPipeline:
                     print(f"briefing collector failed: {collector.name}", flush=True)
 
             context.completed_at = self._clock()
-            status = "completed_with_errors" if context.errors else "completed"
+            status = "no_market_open" if no_market_open else (
+                "completed_with_errors" if context.errors else "completed"
+            )
             result: dict[str, object] = {
                 "schema_version": SCHEMA_VERSION,
                 "briefing_type": briefing_type.value,
@@ -148,6 +168,20 @@ class DailyBriefingPipeline:
                 "warnings": context.warnings,
                 "errors": context.errors,
             }
+            if briefing_type is BriefingType.PRE_MARKET:
+                if monitoring is None:
+                    monitoring = {
+                        "window_start": "08:00:00", "window_end": "09:00:00",
+                        "actual_start": "", "sampling_interval_seconds": 300,
+                        "sample_count": 0, "coverage_status": "not_started",
+                        "market_open_detected": False, "indices": {}, "large_caps": {},
+                        "holdings": [], "leaders": [], "changes": {}, "signals": [],
+                        "warnings": ["preopen monitoring was not started"],
+                    }
+                result["preopen_monitoring"] = monitoring
+                context.warnings.extend(str(item) for item in monitoring.get("warnings", []) if item)
+            if no_market_open:
+                result["message"] = "장이 개시되지 않아 오늘 브리핑이 없습니다."
             pre_market_source = None
             intraday_source = None
             if briefing_type is BriefingType.INTRADAY_10AM:
@@ -164,8 +198,9 @@ class DailyBriefingPipeline:
                 intraday_source = self._load_same_day_result(
                     context, BriefingType.INTRADAY_10AM, "intraday"
                 )
-            result["analysis"] = analyze_briefing(
-                result, intraday_source or pre_market_source
+            result["analysis"] = (
+                {"market_state": "insufficient_data", "summary": result["message"], "warnings": list(context.warnings)}
+                if no_market_open else analyze_briefing(result, intraday_source or pre_market_source)
             )
             leadership_result = collector_results.get("kiwoom_market_leadership")
             if isinstance(leadership_result, dict) and isinstance(

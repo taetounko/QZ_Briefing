@@ -6,7 +6,7 @@ import os
 import sys
 import argparse
 from collections.abc import Callable, Sequence
-from datetime import date, datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Protocol
 
@@ -26,6 +26,8 @@ from qz_briefing.briefing import (
     KiwoomLeadershipDataSource,
     KiwoomAccountHoldingsSource,
     KiwoomStockBasicDataSource,
+    KiwoomPreopenRealSource,
+    PreopenMonitoringController,
     UnavailableFuturesContractResolver,
 )
 from qz_briefing.kiwoom import (
@@ -39,6 +41,7 @@ from qz_briefing.runtime import QtConnectionRuntime
 from qz_briefing.runtime.automatic_shutdown import GracefulShutdownController
 from qz_briefing.scheduling import (
     BriefingScheduler,
+    PREOPEN_MONITORING,
     ConnectionAwareBriefingDispatcher,
     MarketStatus,
     TradingDayResult,
@@ -253,8 +256,10 @@ class ConsoleConnectionReporter:
         )
         if transition.reason == "login event confirmed connected state":
             print("LOGIN SUCCESS", flush=True)
+            print("auto_login_success", flush=True)
         elif transition.reason.startswith("login event reported an error"):
             print("LOGIN FAILED", flush=True)
+            print("auto_login_failed", flush=True)
 
 
 def run(
@@ -313,11 +318,7 @@ def run(
                 flush=True,
             )
         if trading_day.status is MarketStatus.CLOSED:
-            shutdown_controller.request_shutdown(
-                "non-trading day shutdown requested: "
-                f"date={trading_day.date.isoformat()} reason={trading_day.reason}"
-            )
-            return 0
+            print("calendar closure is advisory; waiting for official market state", flush=True)
 
         adapter = adapter_factory()
         print("KIWOOM OCX READY", flush=True)
@@ -331,6 +332,24 @@ def run(
             tr_queue.set_timeout_observer(observe_tr_timeout)
         shutdown_controller.attach_briefing_scheduler(tr_queue)
         pipeline = briefing_pipeline_factory(clock, tr_queue)
+        from PyQt5.QtCore import QTimer
+        preopen_source = (
+            KiwoomPreopenRealSource(adapter, ("005930", "000660"))
+            if hasattr(adapter, "add_real_data_listener") else None
+        )
+        preopen_monitor = PreopenMonitoringController(
+            preopen_source.snapshot if preopen_source else lambda: {
+                "market_open_detected": False,
+                "data_source": "not_available",
+                "warnings": ["official real-time interface is unavailable"],
+            }, clock=clock, timer_factory=QTimer
+        )
+        if hasattr(pipeline, "set_preopen_monitoring_provider"):
+            pipeline.set_preopen_monitoring_provider(lambda: preopen_monitor.result)
+        shutdown_controller.attach_briefing_scheduler(preopen_monitor)
+        if preopen_source is not None:
+            shutdown_controller.attach_briefing_scheduler(preopen_source)
+        preopen_requested = False
         dispatcher = ConnectionAwareBriefingDispatcher(
             connection_state=lambda: manager.state,
             shutdown_started=lambda: shutdown_controller.shutdown_started,
@@ -363,6 +382,11 @@ def run(
             )
 
         def run_briefing(briefing_type: BriefingType) -> None:
+            preopen_monitor.refresh_market_state()
+            if briefing_type is BriefingType.PRE_MARKET:
+                preopen_monitor.stop()
+                if preopen_source is not None:
+                    preopen_source.stop()
             dispatcher.dispatch(
                 now.date(),
                 briefing_type,
@@ -375,28 +399,62 @@ def run(
                 ),
             )
 
+        pre_market_grace_timer = None
+
+        def request_pre_market() -> None:
+            """Wait through 09:05 only when no official open/trade signal exists."""
+            nonlocal pre_market_grace_timer
+            current = clock()
+            if preopen_monitor.refresh_market_state() or current.time() >= time(9, 5):
+                run_briefing(BriefingType.PRE_MARKET)
+                return
+            grace_end = datetime.combine(current.date(), time(9, 5), tzinfo=current.tzinfo)
+            pre_market_grace_timer = QTimer()
+            pre_market_grace_timer.setSingleShot(True)
+            pre_market_grace_timer.timeout.connect(
+                lambda: run_briefing(BriefingType.PRE_MARKET)
+            )
+            pre_market_grace_timer.start(
+                max(0, int((grace_end - current).total_seconds() * 1000))
+            )
+            shutdown_controller.attach_briefing_scheduler(pre_market_grace_timer)
+            print("market open confirmation pending until 09:05", flush=True)
+
+        def start_preopen_monitoring() -> None:
+            nonlocal preopen_requested
+            preopen_requested = True
+            if manager.state is not ConnectionState.CONNECTED:
+                print("preopen monitoring pending: Kiwoom is not connected", flush=True)
+                return
+            if preopen_source is not None:
+                preopen_source.start()
+            preopen_monitor.start()
+            print("preopen monitoring started", flush=True)
+
         callbacks = {
-                BriefingType.PRE_MARKET.value: lambda: run_briefing(
-                    BriefingType.PRE_MARKET
-                ),
+                PREOPEN_MONITORING: lambda: start_preopen_monitoring(),
+                BriefingType.PRE_MARKET.value: request_pre_market,
                 BriefingType.INTRADAY_10AM.value: lambda: run_briefing(
                     BriefingType.INTRADAY_10AM
                 ),
                 BriefingType.MARKET_CLOSE.value: lambda: run_briefing(
                     BriefingType.MARKET_CLOSE
                 ),
-            }
+        }
         if not manual_market_close:
             briefing_scheduler = briefing_scheduler_factory(callbacks)
         shutdown_controller.attach_briefing_scheduler(dispatcher)
         if briefing_scheduler is not None:
             shutdown_controller.attach_briefing_scheduler(briefing_scheduler)
         def report_connection_state(state: ConnectionState) -> None:
+            nonlocal preopen_requested
             if state is ConnectionState.CONNECTED and hasattr(tr_queue, "resume"):
                 tr_queue.resume()
             elif state in {ConnectionState.RECHECKING, ConnectionState.RECONNECT_WAIT, ConnectionState.RECONNECTING, ConnectionState.FAILED} and hasattr(tr_queue, "pause"):
                 tr_queue.pause(f"connection recovery state: {state.name}")
             dispatcher.on_connection_state(state)
+            if state is ConnectionState.CONNECTED and preopen_requested and not preopen_monitor.result.get("actual_start"):
+                start_preopen_monitoring()
             if dashboard is not None and hasattr(dashboard, "handle_connection_state"):
                 dashboard.handle_connection_state(state)
 

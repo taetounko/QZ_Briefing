@@ -222,37 +222,36 @@ def test_entry_point_after_8_pm_exits_without_creating_kiwoom_runtime() -> None:
     assert process_lock.unlock_count == 1
 
 
-def test_non_trading_day_uses_graceful_shutdown_before_kiwoom_creation() -> None:
+def test_calendar_closed_day_waits_for_official_market_state() -> None:
     events: list[str] = []
     timer = FakeTimer(events)
     process_lock = FakeLock(events)
     application = FakeApplication(events)
+    adapter_attempted = False
 
-    def unexpected_adapter() -> object:
-        raise AssertionError("Kiwoom adapter must not be created on a non-trading day")
+    def observe_adapter_creation() -> object:
+        nonlocal adapter_attempted
+        adapter_attempted = True
+        raise RuntimeError("stop after proving OCX creation was attempted")
 
     now = datetime(2026, 7, 19, 9, 0)
-    exit_code = application_run(
-        [],
-        application_factory=lambda arguments: application,
-        adapter_factory=unexpected_adapter,  # type: ignore[arg-type]
-        lock_factory=lambda: process_lock,
-        shutdown_controller_factory=lambda app, lock: GracefulShutdownController(
-            app,
-            lock,
-            timer_factory=lambda: timer,
-            clock=lambda: now,
-            flush_logs=lambda: events.append("logs.flush"),
-        ),
-        market_day_checker=lambda target_date: TradingDayResult(
-            target_date, MarketStatus.CLOSED, "weekend"
-        ),
-        clock=lambda: now,
-    )
-
-    assert exit_code == 0
-    assert application.exec_count == 0
-    assert application.quit_count == 1
+    try:
+        application_run(
+            [], application_factory=lambda arguments: application,
+            adapter_factory=observe_adapter_creation,  # type: ignore[arg-type]
+            lock_factory=lambda: process_lock,
+            shutdown_controller_factory=lambda app, lock: GracefulShutdownController(
+                app, lock, timer_factory=lambda: timer, clock=lambda: now,
+                flush_logs=lambda: events.append("logs.flush"),
+            ),
+            market_day_checker=lambda target_date: TradingDayResult(
+                target_date, MarketStatus.CLOSED, "weekend"
+            ), clock=lambda: now,
+        )
+    except RuntimeError as exc:
+        assert "OCX creation" in str(exc)
+    assert adapter_attempted
+    assert application.quit_count == 0
     assert process_lock.unlock_count == 1
 
 

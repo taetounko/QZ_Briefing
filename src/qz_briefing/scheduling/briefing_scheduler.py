@@ -11,9 +11,11 @@ from typing import Protocol
 from qz_briefing.briefing.models import BriefingType
 
 PRE_MARKET = BriefingType.PRE_MARKET.value
+PREOPEN_MONITORING = "preopen_monitoring"
 INTRADAY_10AM = BriefingType.INTRADAY_10AM.value
 MARKET_CLOSE = BriefingType.MARKET_CLOSE.value
-PRE_MARKET_TIME = time(8, 0)
+PREOPEN_START_TIME = time(8, 0)
+PRE_MARKET_TIME = time(9, 0)
 INTRADAY_TIME = time(10, 0)
 MARKET_CLOSE_TIME = time(15, 40)
 OPERATING_END_TIME = time(20, 0)
@@ -29,6 +31,7 @@ class BriefingPlanItem:
 def briefing_plan(now: datetime) -> tuple[BriefingPlanItem, ...]:
     """Return today's explicit catch-up and future scheduling policy."""
     pre_market_at = datetime.combine(now.date(), PRE_MARKET_TIME, tzinfo=now.tzinfo)
+    preopen_at = datetime.combine(now.date(), PREOPEN_START_TIME, tzinfo=now.tzinfo)
     intraday_at = datetime.combine(now.date(), INTRADAY_TIME, tzinfo=now.tzinfo)
     market_close_at = datetime.combine(now.date(), MARKET_CLOSE_TIME, tzinfo=now.tzinfo)
     operating_end_at = datetime.combine(now.date(), OPERATING_END_TIME, tzinfo=now.tzinfo)
@@ -39,8 +42,16 @@ def briefing_plan(now: datetime) -> tuple[BriefingPlanItem, ...]:
     if now >= operating_end_at:
         return ()
 
+    if now < preopen_at:
+        return (
+            scheduled(PREOPEN_MONITORING, preopen_at),
+            scheduled(PRE_MARKET, pre_market_at),
+            scheduled(INTRADAY_10AM, intraday_at),
+            scheduled(MARKET_CLOSE, market_close_at),
+        )
     if now < pre_market_at:
         return (
+            BriefingPlanItem(PREOPEN_MONITORING, True, 0),
             scheduled(PRE_MARKET, pre_market_at),
             scheduled(INTRADAY_10AM, intraday_at),
             scheduled(MARKET_CLOSE, market_close_at),

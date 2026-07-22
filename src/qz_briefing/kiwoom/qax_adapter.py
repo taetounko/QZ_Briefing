@@ -10,6 +10,7 @@ from typing import Protocol
 KIWOOM_CONTROL_ID = "KHOPENAPI.KHOpenAPICtrl.1"
 LoginEventListener = Callable[[int], None]
 TrDataListener = Callable[..., None]
+RealDataListener = Callable[[str, str, str], None]
 
 
 class KiwoomAdapterError(Exception):
@@ -53,6 +54,7 @@ class SignalLike(Protocol):
 class QAxWidgetLike(Protocol):
     OnEventConnect: SignalLike
     OnReceiveTrData: SignalLike
+    OnReceiveRealData: SignalLike
 
     def setControl(self, control_id: str) -> bool: ...
 
@@ -93,6 +95,7 @@ class KiwoomQAxAdapter:
         self._widget = widget if widget is not None else factory()
         self._listeners: list[LoginEventListener] = []
         self._tr_data_listeners: list[TrDataListener] = []
+        self._real_data_listeners: list[RealDataListener] = []
         self._closed = False
         self._signal_connected = False
         self._listener_error_count = 0
@@ -104,6 +107,8 @@ class KiwoomQAxAdapter:
         self._signal_handler = self._handle_login_event
         self._tr_data_signal_handler = self._handle_tr_data
         self._tr_data_signal_connected = False
+        self._real_data_signal_handler = self._handle_real_data
+        self._real_data_signal_connected = False
 
         try:
             if not uses_default_factory:
@@ -121,6 +126,10 @@ class KiwoomQAxAdapter:
             self._signal_connected = True
             self._widget.OnReceiveTrData.connect(self._tr_data_signal_handler)
             self._tr_data_signal_connected = True
+            real_signal = getattr(self._widget, "OnReceiveRealData", None)
+            if real_signal is not None:
+                real_signal.connect(self._real_data_signal_handler)
+                self._real_data_signal_connected = True
         except KiwoomAdapterError:
             self._closed = True
             self._dispose_widget()
@@ -259,6 +268,29 @@ class KiwoomQAxAdapter:
         if callback not in self._tr_data_listeners:
             self._tr_data_listeners.append(callback)
 
+    def add_real_data_listener(self, callback: RealDataListener) -> None:
+        self._ensure_open()
+        if callback not in self._real_data_listeners:
+            self._real_data_listeners.append(callback)
+
+    def register_real_data(self, screen_no: str, codes: list[str], fids: tuple[int, ...]) -> int:
+        """Register documented read-only real-time fields for a bounded code set."""
+        self._ensure_open()
+        return int(self._widget.dynamicCall(
+            "SetRealReg(QString, QString, QString, QString)",
+            str(screen_no), ";".join(codes), ";".join(map(str, fids)), "0",
+        ))
+
+    def get_comm_real_data(self, code: str, fid: int) -> str:
+        self._ensure_open()
+        return str(self._widget.dynamicCall(
+            "GetCommRealData(QString, int)", str(code), int(fid)
+        )).strip()
+
+    def unregister_real_data(self, screen_no: str) -> None:
+        self._ensure_open()
+        self._widget.dynamicCall("SetRealRemove(QString, QString)", str(screen_no), "ALL")
+
     def add_login_event_listener(self, callback: LoginEventListener) -> None:
         """Register a callback once without storing authentication data."""
         self._ensure_open()
@@ -287,8 +319,16 @@ class KiwoomQAxAdapter:
                 self._cleanup_error_count += 1
             self._tr_data_signal_connected = False
 
+        if self._real_data_signal_connected:
+            try:
+                getattr(self._widget, "OnReceiveRealData").disconnect(self._real_data_signal_handler)
+            except Exception:
+                self._cleanup_error_count += 1
+            self._real_data_signal_connected = False
+
         self._listeners.clear()
         self._tr_data_listeners.clear()
+        self._real_data_listeners.clear()
         self._dispose_widget()
 
     def _handle_login_event(self, raw_error_code: object) -> None:
@@ -312,6 +352,13 @@ class KiwoomQAxAdapter:
         for callback in tuple(self._tr_data_listeners):
             try:
                 callback(*arguments)
+            except Exception:
+                self._listener_error_count += 1
+
+    def _handle_real_data(self, code: object, real_type: object, raw: object) -> None:
+        for callback in tuple(self._real_data_listeners):
+            try:
+                callback(str(code).strip(), str(real_type).strip(), str(raw))
             except Exception:
                 self._listener_error_count += 1
 

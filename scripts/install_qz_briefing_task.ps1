@@ -21,7 +21,7 @@ $Action = New-ScheduledTaskAction `
     -Argument $PythonArguments `
     -WorkingDirectory $ProjectPath
 
-$Trigger = New-ScheduledTaskTrigger -Daily -At "06:50"
+$Trigger = New-ScheduledTaskTrigger -Daily -At "07:30"
 
 # Kiwoom OpenAPI/QAxWidget requires the signed-in user's interactive desktop.
 $Principal = New-ScheduledTaskPrincipal `
@@ -30,7 +30,6 @@ $Principal = New-ScheduledTaskPrincipal `
     -RunLevel Limited
 
 $Settings = New-ScheduledTaskSettingsSet `
-    -RunOnlyIfNetworkAvailable `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
     -StartWhenAvailable `

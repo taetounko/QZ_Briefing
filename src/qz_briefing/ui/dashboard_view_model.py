@@ -12,7 +12,7 @@ from .formatters import mask_account
 
 
 RESULT_NAMES = {
-    "pre_market": ("pre_market.json", "pre_market.md", "08:00"),
+    "pre_market": ("pre_market.json", "pre_market.md", "09:00"),
     "intraday_10am": ("intraday_10am.json", "intraday_10am.md", "10:00"),
     "market_close": ("market_close.json", "market_close.md", "15:40"),
     "market_close_validation": ("market_close_validation.json", "market_close_validation.md", "수동 실행"),
