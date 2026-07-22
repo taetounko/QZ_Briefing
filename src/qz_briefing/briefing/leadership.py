@@ -119,8 +119,8 @@ def score_rebound(item: dict[str, object], market_rate: float | None) -> dict[st
 class KiwoomLeadershipCollector:
     name = "kiwoom_market_leadership"
 
-    def __init__(self, source: LeadershipDataSource, clock: Callable[[], datetime] = datetime.now) -> None:
-        self._data_source, self._clock = source, clock
+    def __init__(self, source: LeadershipDataSource, clock: Callable[[], datetime] = datetime.now, on_selected: Callable[[set[str]], None] | None = None) -> None:
+        self._data_source, self._clock, self._on_selected = source, clock, on_selected
 
     def collect(self, context: BriefingContext) -> dict[str, object]:
         markets: dict[str, list[dict[str, object]]] = {}; rebounds: list[dict[str, object]] = []; errors = []
@@ -168,7 +168,10 @@ class KiwoomLeadershipCollector:
         unique = []; seen = set()
         for row in rebounds:
             if row["code"] not in seen: seen.add(row["code"]); unique.append(row)
-        return {"collector": self.name, "collected_at": self._clock().isoformat(), "kospi": markets.get("KOSPI", []), "kosdaq": markets.get("KOSDAQ", []), "rebound_candidates": unique[:10], "warnings": warnings, "errors": errors}
+        result = {"collector": self.name, "collected_at": self._clock().isoformat(), "kospi": markets.get("KOSPI", []), "kosdaq": markets.get("KOSDAQ", []), "rebound_candidates": unique[:10], "warnings": warnings, "errors": errors}
+        if self._on_selected is not None:
+            self._on_selected({str(row["code"]) for key in ("kospi", "kosdaq") for row in result[key]})
+        return result
 
 
 def normalize_candidate(raw: dict[str, str], market: str) -> dict[str, object]:

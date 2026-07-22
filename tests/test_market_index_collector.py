@@ -183,12 +183,14 @@ def test_default_pipeline_registers_collectors_in_order_with_same_queue() -> Non
         "kiwoom_investor_flows",
         "kiwoom_derivatives_flows",
         "kiwoom_market_leadership",
+        "holdings_analysis",
     ]
     core_source = collectors[0]._data_source  # type: ignore[attr-defined]
     index_source = collectors[1]._data_source  # type: ignore[attr-defined]
     flow_source = collectors[2]._data_source  # type: ignore[attr-defined]
     derivatives_source = collectors[3]._data_source  # type: ignore[attr-defined]
     leadership_source = collectors[4]._data_source  # type: ignore[attr-defined]
+    holdings_collector = collectors[5]
     assert isinstance(core_source, KiwoomStockBasicDataSource)
     assert isinstance(index_source, KiwoomMarketIndexDataSource)
     assert core_source._tr_queue is queue  # type: ignore[attr-defined]
@@ -196,3 +198,5 @@ def test_default_pipeline_registers_collectors_in_order_with_same_queue() -> Non
     assert flow_source._tr_queue is queue  # type: ignore[attr-defined]
     assert derivatives_source._tr_queue is queue  # type: ignore[attr-defined]
     assert leadership_source._tr_queue is queue  # type: ignore[attr-defined]
+    assert holdings_collector._stock_source is core_source  # type: ignore[attr-defined]
+    assert holdings_collector._daily_source is leadership_source  # type: ignore[attr-defined]

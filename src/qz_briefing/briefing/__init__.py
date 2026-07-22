@@ -14,6 +14,7 @@ from .collectors import (
 )
 from .models import BriefingRunResult, BriefingType
 from .leadership import KiwoomLeadershipCollector, KiwoomLeadershipDataSource
+from .holdings import HoldingsCollector, load_holdings
 from .derivatives import (
     FuturesContractResolution,
     KiwoomDerivativesDataSource,
@@ -38,6 +39,8 @@ __all__ = [
     "KiwoomInvestorFlowDataSource",
     "KiwoomLeadershipCollector",
     "KiwoomLeadershipDataSource",
+    "HoldingsCollector",
+    "load_holdings",
     "KiwoomStockBasicDataSource",
     "PlaceholderCollector",
     "UnavailableFuturesContractResolver",

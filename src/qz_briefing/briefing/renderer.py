@@ -47,6 +47,7 @@ def render_markdown(result: dict[str, object]) -> str:
     errors = result.get("errors", [])
     lines.extend(f"- {error}" for error in errors) if errors else lines.append("- 수집 오류 없음")
     lines.extend(render_leadership(result.get("leadership")))
+    lines.extend(render_holdings(result.get("holdings_analysis")))
     return "\n".join(lines) + "\n"
 
 
@@ -73,6 +74,43 @@ def render_leadership(value: object) -> list[str]:
         lines.append("- 비교 가능한 장전 후보가 없습니다.")
     lines.extend(["", "## 선정 기준과 주의사항", "", "- 상승률뿐 아니라 거래대금 순위, 시가·고가 위치, 상대강도와 기술 이력을 함께 평가합니다.", "- 선정 결과는 시장 관찰용이며 매수 지시나 수익 보장이 아닙니다."])
     return lines
+
+
+def render_holdings(value: object) -> list[str]:
+    data = value if isinstance(value, dict) else {}
+    portfolio = data.get("portfolio", {}) if isinstance(data.get("portfolio"), dict) else {}
+    lines = ["", "## 보유종목 종합", ""]
+    if not data.get("holdings"):
+        lines.append("- 등록된 보유종목이 없거나 분석할 수 없습니다.")
+    else:
+        lines.extend([
+            f"- 기준: {'최근 종가' if data.get('basis') == 'latest_close' else '당일 현재가'}",
+            f"- 총 투자금: {quantity(portfolio.get('investment_amount'), '원')}",
+            f"- 평가금액: {quantity(portfolio.get('valuation_amount'), '원')}",
+            f"- 평가손익: {quantity(portfolio.get('profit_loss'), '원')}",
+            f"- 전체 수익률: {percent(portfolio.get('profit_rate'))}",
+        ])
+    for item in data.get("holdings", []):
+        lines.extend([
+            "", f"### {item.get('name') or '종목명 없음'} ({item.get('code')})", "",
+            f"- 수량 {item.get('quantity'):,}주 / 평단 {item.get('average_price'):,.2f}원 / 현재가 {item.get('current_price'):,}원",
+            f"- 평가손익 {item.get('profit_loss'):+,.0f}원 / 수익률 {item.get('profit_rate'):+.2f}%",
+            f"- 추세 상태: `{item.get('trend')}`",
+            f"- 기술적 위치: 5일선 {optional_number(item.get('moving_averages', {}).get('ma5'))}, 20일선 {optional_number(item.get('moving_averages', {}).get('ma20'))}, 60일선 {optional_number(item.get('moving_averages', {}).get('ma60'))}",
+            f"- 바닥 확인 상태: `{item.get('bottom_confirmation')}`",
+            f"- 물타기·불타기·축소 검토: `{item.get('review_status')}`",
+            "- 주의: 수수료와 세금은 반영하지 않았으며 확정적인 매수·매도 지시가 아닙니다.",
+        ])
+    comparison = data.get("comparison_with_pre_market")
+    if comparison:
+        lines.extend(["", "### 장전 대비 보유종목 상태 변화", ""])
+        for change in comparison:
+            lines.append(f"- {change['code']}: 추세 {change['trend']['pre_market']} → {change['trend']['current']}, 검토 {change['review_status']['pre_market']} → {change['review_status']['current']}")
+    return lines
+
+
+def optional_number(value: object) -> str:
+    return f"{value:,.2f}" if isinstance(value, (int, float)) else "데이터 없음"
 
 
 def core_number_lines(result: dict[str, object]) -> list[str]:

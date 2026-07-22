@@ -25,6 +25,7 @@ Desktop.ini
 # Runtime and private data
 config/*
 !config/.gitkeep
+!config/holdings.example.json
 data/*
 !data/.gitkeep
 data/briefings/

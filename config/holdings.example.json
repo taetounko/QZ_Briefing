@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "holdings": [
+    {
+      "code": "005930",
+      "name": "삼성전자",
+      "quantity": 10,
+      "average_price": 230000,
+      "target_price": null,
+      "stop_price": null,
+      "maximum_additional_budget": null,
+      "memo": ""
+    }
+  ]
+}

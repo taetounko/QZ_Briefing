@@ -13,6 +13,7 @@ from qz_briefing.briefing import (
     BriefingStorage,
     BriefingType,
     DailyBriefingPipeline,
+    HoldingsCollector,
     KiwoomDerivativesDataSource,
     KiwoomDerivativesFlowCollector,
     KiwoomCoreMarketCollector,
@@ -94,11 +95,19 @@ def create_briefing_pipeline(
     storage = BriefingStorage(
         Path(__file__).resolve().parents[2] / "data" / "briefings"
     )
+    project_root = Path(__file__).resolve().parents[2]
+    selected_leadership_codes: set[str] = set()
+    stock_source = KiwoomStockBasicDataSource(tr_queue)
+    daily_source = KiwoomLeadershipDataSource(tr_queue)
+
+    def update_leadership_codes(codes: set[str]) -> None:
+        selected_leadership_codes.clear()
+        selected_leadership_codes.update(codes)
     return DailyBriefingPipeline(
         storage,
         [
             KiwoomCoreMarketCollector(
-                KiwoomStockBasicDataSource(tr_queue), clock=clock
+                stock_source, clock=clock
             ),
             KiwoomMarketIndexCollector(
                 KiwoomMarketIndexDataSource(tr_queue), clock=clock
@@ -112,7 +121,16 @@ def create_briefing_pipeline(
                 clock=clock,
             ),
             KiwoomLeadershipCollector(
-                KiwoomLeadershipDataSource(tr_queue), clock=clock
+                daily_source,
+                clock=clock,
+                on_selected=update_leadership_codes,
+            ),
+            HoldingsCollector(
+                project_root / "config" / "holdings.json",
+                stock_source,
+                daily_source,
+                leadership_codes=lambda: set(selected_leadership_codes),
+                clock=clock,
             ),
         ],
         clock=clock,

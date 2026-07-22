@@ -170,6 +170,20 @@ class DailyBriefingPipeline:
                             result["leadership"], pre_market_source["leadership"]
                         )
                     )
+            holdings_result = collector_results.get("holdings_analysis")
+            if isinstance(holdings_result, dict) and isinstance(
+                holdings_result.get("data"), dict
+            ):
+                result["holdings_analysis"] = holdings_result["data"]
+                if pre_market_source and isinstance(
+                    pre_market_source.get("holdings_analysis"), dict
+                ):
+                    result["holdings_analysis"]["comparison_with_pre_market"] = (
+                        compare_holdings(
+                            result["holdings_analysis"],
+                            pre_market_source["holdings_analysis"],
+                        )
+                    )
             json_path, markdown_path = self._storage.save(
                 trading_date, briefing_type, result, render_markdown(result)
             )
@@ -293,3 +307,25 @@ def build_leadership_output(
             row["rank"] = rank
         output[key] = rescored[:10]
     return output
+
+
+def compare_holdings(
+    current: dict[str, object], previous: dict[str, object]
+) -> list[dict[str, object]]:
+    old = {
+        str(item.get("code")): item
+        for item in previous.get("holdings", [])
+        if isinstance(item, dict)
+    }
+    changes = []
+    for item in current.get("holdings", []):
+        if not isinstance(item, dict) or str(item.get("code")) not in old:
+            continue
+        prior = old[str(item.get("code"))]
+        changes.append({
+            "code": item.get("code"),
+            "trend": {"pre_market": prior.get("trend"), "current": item.get("trend")},
+            "bottom_confirmation": {"pre_market": prior.get("bottom_confirmation"), "current": item.get("bottom_confirmation")},
+            "review_status": {"pre_market": prior.get("review_status"), "current": item.get("review_status")},
+        })
+    return changes
