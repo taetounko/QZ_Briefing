@@ -83,6 +83,12 @@ BriefingPipelineFactory = Callable[
     [LocalClock, KiwoomTrRequestQueue], DailyBriefingPipeline
 ]
 TrQueueFactory = Callable[[KiwoomQAxAdapter], KiwoomTrRequestQueue]
+DashboardFactory = Callable[..., object]
+
+
+def create_dashboard(**kwargs: object) -> object:
+    from qz_briefing.ui import DashboardMainWindow
+    return DashboardMainWindow(**kwargs)
 
 
 def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespace:
@@ -264,6 +270,7 @@ def run(
     briefing_scheduler_factory: BriefingSchedulerFactory = BriefingScheduler,
     briefing_pipeline_factory: BriefingPipelineFactory = create_briefing_pipeline,
     tr_queue_factory: TrQueueFactory = KiwoomTrRequestQueue,
+    dashboard_factory: DashboardFactory | None = create_dashboard,
     clock: LocalClock = datetime.now,
 ) -> int:
     """Assemble the connection runtime and keep the Qt event loop running."""
@@ -322,6 +329,32 @@ def run(
             connection_state=lambda: manager.state,
             shutdown_started=lambda: shutdown_controller.shutdown_started,
         )
+        dashboard = None
+        try:
+            if dashboard_factory is None:
+                raise LookupError("dashboard disabled by caller")
+            dashboard = dashboard_factory(
+                root=pipeline.storage_root,
+                connection_state=lambda: manager.state,
+                trading_day_status=trading_day.status.value,
+                shutdown=lambda: shutdown_controller.request_shutdown(
+                    "dashboard tray shutdown requested"
+                ),
+                clock=clock,
+            )
+            if dashboard is not None:
+                pipeline.add_completion_listener(
+                    lambda name, path: dashboard.handle_briefing_completed(name)
+                )
+                shutdown_controller.attach_briefing_scheduler(dashboard)
+                dashboard.show()
+        except LookupError:
+            pass
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception(
+                "dashboard initialization failed; briefing runtime will continue"
+            )
 
         def run_briefing(briefing_type: BriefingType) -> None:
             dispatcher.dispatch(

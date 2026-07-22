@@ -142,6 +142,7 @@ def run(*args: object, **kwargs: object) -> int:
     )
     kwargs.setdefault("briefing_scheduler_factory", FakeBriefingScheduler)
     kwargs.setdefault("tr_queue_factory", FakeTrQueue)
+    kwargs.setdefault("dashboard_factory", None)
     kwargs.setdefault("clock", lambda: datetime(2026, 7, 20, 9, 0))
     return application_run(*args, **kwargs)  # type: ignore[arg-type]
 
@@ -226,6 +227,29 @@ class FakeConnection:
 
 
 class MainEntryPointTests(unittest.TestCase):
+    def test_dashboard_initialization_failure_does_not_stop_briefing_runtime(self) -> None:
+        events: list[str] = []
+        runtime = FakeRuntime(events)
+
+        def fail_dashboard(**kwargs):
+            raise RuntimeError("ui unavailable")
+
+        with self.assertLogs("qz_briefing.__main__", level="ERROR"):
+            exit_code = run(
+                [],
+                application_factory=lambda arguments: FakeApplication(events),
+                adapter_factory=FakeAdapter,  # type: ignore[arg-type]
+                manager_factory=lambda adapter: FakeManager(),  # type: ignore[arg-type]
+                runtime_factory=lambda *args, **kwargs: runtime,
+                lock_factory=FakeProcessLock,
+                dashboard_factory=fail_dashboard,
+                briefing_pipeline_factory=lambda clock, queue: type(
+                    "Pipeline", (), {"storage_root": Path("briefings")}
+                )(),
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(runtime.start_count, 1)
+
     def test_manual_market_close_argument_parsing_and_invalid_value(self) -> None:
         self.assertEqual(
             parse_cli_arguments(["--run-now", "market_close"]).run_now,

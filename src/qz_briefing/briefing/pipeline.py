@@ -41,6 +41,15 @@ class DailyBriefingPipeline:
         self._clock = clock
         self._in_progress: set[tuple[date, BriefingType, bool]] = set()
         self._completed: set[tuple[date, BriefingType]] = set()
+        self._completion_listeners: list[Callable[[str, str], None]] = []
+
+    @property
+    def storage_root(self):
+        return self._storage.root
+
+    def add_completion_listener(self, listener: Callable[[str, str], None]) -> None:
+        if listener not in self._completion_listeners:
+            self._completion_listeners.append(listener)
 
     def run(
         self,
@@ -242,6 +251,11 @@ class DailyBriefingPipeline:
                 self._completed.add(key)
             print(f"briefing result saved: {json_path}", flush=True)
             print(f"briefing pipeline completed: {log_name}", flush=True)
+            for listener in tuple(self._completion_listeners):
+                try:
+                    listener(log_name, str(json_path))
+                except Exception:
+                    LOGGER.exception("briefing dashboard refresh notification failed")
             return BriefingRunResult(
                 status,
                 briefing_type,
