@@ -47,6 +47,9 @@ class ConnectionAwareBriefingDispatcher:
     def pending_count(self) -> int:
         return len(self._pending)
 
+    def is_pending(self, trading_date: date, briefing_type: BriefingType) -> bool:
+        return (trading_date, briefing_type) in self._pending
+
     def dispatch(
         self,
         trading_date: date,

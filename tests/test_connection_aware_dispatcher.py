@@ -29,6 +29,7 @@ def test_disconnected_briefing_is_pending() -> None:
         TRADING_DATE, BriefingType.PRE_MARKET, lambda: calls.append("pre")
     )
     assert dispatcher.pending_count == 1
+    assert dispatcher.is_pending(TRADING_DATE, BriefingType.PRE_MARKET)
     assert calls == []
 
 

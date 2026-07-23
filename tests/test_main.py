@@ -29,6 +29,7 @@ from qz_briefing.kiwoom import (  # noqa: E402
     KiwoomConnectionManager,
 )
 from qz_briefing.briefing import BriefingType  # noqa: E402
+from qz_briefing.notifications import DisabledNotificationService  # noqa: E402
 from qz_briefing.scheduling import MarketStatus, TradingDayResult  # noqa: E402
 
 
@@ -159,6 +160,7 @@ def run(*args: object, **kwargs: object) -> int:
     kwargs.setdefault("dashboard_factory", None)
     kwargs.setdefault("sleep_inhibitor_factory", FakeSleepInhibitor)
     kwargs.setdefault("runtime_monitor_factory", FakeRuntimeMonitor)
+    kwargs.setdefault("notification_service_factory", lambda project, data, timer: DisabledNotificationService())
     kwargs.setdefault("logging_configurator", lambda root: None)
     kwargs.setdefault("clock", lambda: datetime(2026, 7, 20, 9, 0))
     return application_run(*args, **kwargs)  # type: ignore[arg-type]

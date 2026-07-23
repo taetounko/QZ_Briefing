@@ -101,6 +101,7 @@ TrQueueFactory = Callable[[KiwoomQAxAdapter], KiwoomTrRequestQueue]
 DashboardFactory = Callable[..., object]
 SleepInhibitorFactory = Callable[[], SleepInhibitor]
 RuntimeMonitorFactory = Callable[..., RuntimeMonitor]
+NotificationServiceFactory = Callable[[Path, Path, object], object]
 
 
 def create_dashboard(**kwargs: object) -> object:
@@ -125,6 +126,7 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     commands.add_argument("--disable-telegram", action="store_true")
     commands.add_argument("--test-notification", action="store_true")
     commands.add_argument("--notification-status", action="store_true")
+    commands.add_argument("--validate-unattended-cycle", action="store_true")
     parser.add_argument("--remove-secret", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(raw)
     if parsed.remove_secret and not parsed.disable_telegram:
@@ -424,12 +426,18 @@ def run(
     dashboard_factory: DashboardFactory | None = create_dashboard,
     sleep_inhibitor_factory: SleepInhibitorFactory = SleepInhibitor,
     runtime_monitor_factory: RuntimeMonitorFactory = RuntimeMonitor,
+    notification_service_factory: NotificationServiceFactory = create_notification_service,
     logging_configurator: Callable[[Path], object] = configure_daily_logging,
     clock: LocalClock = datetime.now,
 ) -> int:
     """Assemble the connection runtime and keep the Qt event loop running."""
     options = parse_cli_arguments(arguments)
     project_root = Path(__file__).resolve().parents[2]
+    if options.validate_unattended_cycle:
+        from qz_briefing.runtime.unattended_validation import print_unattended_validation, validate_unattended_cycle
+        result = validate_unattended_cycle()
+        print_unattended_validation(result)
+        return 0 if result["success"] else 1
     cli_result = handle_notification_cli(options, project_root)
     if cli_result is not None:
         return cli_result
@@ -441,6 +449,24 @@ def run(
         print("QZ BRIEFING ALREADY RUNNING", flush=True)
         return 2
 
+    now = clock()
+    trading_day = market_day_checker(now.date())
+    print(
+        "TRADING DAY "
+        f"date={trading_day.date.isoformat()} "
+        f"status={trading_day.status.value} "
+        f"reason={trading_day.reason}",
+        flush=True,
+    )
+    if trading_day.warning is not None:
+        print(f"TRADING CALENDAR WARNING: {trading_day.warning}", flush=True)
+    if trading_day.status is MarketStatus.UNKNOWN:
+        print("market calendar incomplete; continuing in warning mode", flush=True)
+    if trading_day.status is MarketStatus.CLOSED and not manual_market_close:
+        print("confirmed market closure; no runtime started", flush=True)
+        process_lock.unlock()
+        return 0
+
     shutdown_controller: GracefulShutdownController | None = None
     adapter: KiwoomQAxAdapter | None = None
     runtime: QtConnectionRuntime | None = None
@@ -451,34 +477,16 @@ def run(
         from PyQt5.QtCore import QTimer
         data_root = project_root / "data"
         logging_configurator(data_root)
-        notification_service = create_notification_service(project_root, data_root, QTimer)
+        notification_service = notification_service_factory(project_root, data_root, QTimer)
         print(f"PROCESS PID: {os.getpid()}", flush=True)
         print("QAPPLICATION READY", flush=True)
         shutdown_controller = shutdown_controller_factory(application, process_lock)
         application.aboutToQuit.connect(shutdown_controller.handle_application_quit)
         if not shutdown_controller.schedule():
             return 0
+        shutdown_controller.attach_briefing_scheduler(notification_service)
         sleep_inhibitor = sleep_inhibitor_factory()
         sleep_inhibitor.start()
-
-        now = clock()
-        trading_day = market_day_checker(now.date())
-        print(
-            "TRADING DAY "
-            f"date={trading_day.date.isoformat()} "
-            f"status={trading_day.status.value} "
-            f"reason={trading_day.reason}",
-            flush=True,
-        )
-        if trading_day.warning is not None:
-            print(f"TRADING CALENDAR WARNING: {trading_day.warning}", flush=True)
-        if trading_day.status is MarketStatus.UNKNOWN:
-            print(
-                "market calendar incomplete; continuing in warning mode",
-                flush=True,
-            )
-        if trading_day.status is MarketStatus.CLOSED:
-            print("calendar closure is advisory; waiting for official market state", flush=True)
 
         adapter = adapter_factory()
         print("KIWOOM OCX READY", flush=True)
@@ -492,7 +500,6 @@ def run(
         )
         shutdown_controller.attach_briefing_scheduler(runtime_monitor)
         shutdown_controller.attach_briefing_scheduler(sleep_inhibitor)
-        shutdown_controller.attach_briefing_scheduler(notification_service)
         if hasattr(tr_queue, "set_timeout_observer"):
             def observe_tr_timeout(count: int) -> None:
                 if count < 2: return
@@ -654,7 +661,9 @@ def run(
         runtime_monitor.recovery = MissingBriefingRecovery(
             data_root, callbacks, clock=clock,
             running=lambda name: runtime_monitor.active_briefing == name,
-            pending=lambda name: False,
+            pending=lambda name: dispatcher.is_pending(
+                clock().date(), BriefingType(name)
+            ) if name in {item.value for item in BriefingType} else False,
         )
         if hasattr(pipeline, "add_completion_listener"):
             pipeline.add_completion_listener(

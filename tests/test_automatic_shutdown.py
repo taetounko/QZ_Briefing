@@ -7,6 +7,7 @@ import io
 from datetime import datetime, timedelta, timezone
 
 from qz_briefing.__main__ import run as application_run
+from qz_briefing.notifications import DisabledNotificationService
 from qz_briefing.runtime.automatic_shutdown import (
     GracefulShutdownController,
     time_until_shutdown,
@@ -181,6 +182,23 @@ def test_repeated_shutdown_requests_only_clean_up_once() -> None:
     assert "shutdown already in progress" in output.getvalue()
 
 
+def test_shutdown_continues_all_cleanup_steps_after_resource_errors() -> None:
+    events: list[str] = []
+    controller, _, runtime, process_lock, application = make_controller(
+        datetime(2026, 7, 20, 19, 0), events
+    )
+    class BrokenResource:
+        def stop(self) -> None:
+            events.append("broken.stop")
+            raise RuntimeError("non-sensitive cleanup failure")
+    controller.attach_briefing_scheduler(BrokenResource())
+
+    assert not controller.request_shutdown("automatic shutdown requested")
+    assert events == ["broken.stop", "timer.stop", "runtime.stop", "logs.flush", "lock.unlock", "application.quit"]
+    assert process_lock.unlock_count == 1 and application.quit_count == 1
+    assert not controller.shutdown_completed
+
+
 def test_starting_at_or_after_8_pm_requests_immediate_shutdown() -> None:
     controller, timer, runtime, process_lock, application = make_controller(
         datetime(2026, 7, 20, 20, 0)
@@ -222,7 +240,7 @@ def test_entry_point_after_8_pm_exits_without_creating_kiwoom_runtime() -> None:
     assert process_lock.unlock_count == 1
 
 
-def test_calendar_closed_day_waits_for_official_market_state() -> None:
+def test_calendar_closed_day_exits_before_creating_kiwoom_runtime() -> None:
     events: list[str] = []
     timer = FakeTimer(events)
     process_lock = FakeLock(events)
@@ -232,12 +250,11 @@ def test_calendar_closed_day_waits_for_official_market_state() -> None:
     def observe_adapter_creation() -> object:
         nonlocal adapter_attempted
         adapter_attempted = True
-        raise RuntimeError("stop after proving OCX creation was attempted")
+        raise AssertionError("OCX must not be created on a confirmed closure")
 
     now = datetime(2026, 7, 19, 9, 0)
-    try:
-        application_run(
-            [], application_factory=lambda arguments: application,
+    exit_code = application_run(
+            [], application_factory=lambda arguments: (_ for _ in ()).throw(AssertionError("QApplication must not be created")),
             adapter_factory=observe_adapter_creation,  # type: ignore[arg-type]
             lock_factory=lambda: process_lock,
             shutdown_controller_factory=lambda app, lock: GracefulShutdownController(
@@ -247,10 +264,10 @@ def test_calendar_closed_day_waits_for_official_market_state() -> None:
             market_day_checker=lambda target_date: TradingDayResult(
                 target_date, MarketStatus.CLOSED, "weekend"
             ), clock=lambda: now,
+            notification_service_factory=lambda project, data, timer: DisabledNotificationService(),
         )
-    except RuntimeError as exc:
-        assert "OCX creation" in str(exc)
-    assert adapter_attempted
+    assert exit_code == 0
+    assert not adapter_attempted
     assert application.quit_count == 0
     assert process_lock.unlock_count == 1
 

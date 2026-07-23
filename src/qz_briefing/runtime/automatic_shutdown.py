@@ -137,26 +137,24 @@ class GracefulShutdownController:
 
         self._shutdown_started = True
         print(reason, flush=True)
-        try:
-            for briefing_resource in self._briefing_resources:
-                briefing_resource.stop()
-            # Stop the automatic trigger, then runtime work/reconnect timers.
-            self._timer.stop()
-            if self._runtime is not None:
-                self._runtime.stop()
-            self._flush_logs()
-            if not self._lock_released:
-                self._process_lock.unlock()
-                self._lock_released = True
-            if quit_application:
-                self._application.quit()
-            self._shutdown_completed = True
-            print("graceful shutdown completed", flush=True)
-            return True
-        except Exception:
-            # Completion stays false so failures remain observable, while the
-            # started flag still prevents unsafe duplicate cleanup.
-            raise
+        failures: list[str] = []
+        def cleanup(label: str, callback: Callable[[], None]) -> None:
+            try: callback()
+            except Exception as exc:
+                failures.append(f"{label}: {type(exc).__name__}")
+                logging.getLogger(__name__).exception("shutdown cleanup failed: %s", label)
+        for index, briefing_resource in enumerate(self._briefing_resources):
+            cleanup(f"briefing_resource_{index}", briefing_resource.stop)
+        cleanup("automatic_timer", self._timer.stop)
+        if self._runtime is not None: cleanup("runtime", self._runtime.stop)
+        cleanup("log_flush", self._flush_logs)
+        if not self._lock_released:
+            cleanup("process_lock", self._process_lock.unlock)
+            self._lock_released = True
+        if quit_application: cleanup("application_quit", self._application.quit)
+        self._shutdown_completed = not failures
+        print("graceful shutdown completed" if not failures else "graceful shutdown completed with cleanup errors", flush=True)
+        return not failures
 
     def handle_application_quit(self) -> None:
         """Route ordinary QApplication termination through the same cleanup."""
