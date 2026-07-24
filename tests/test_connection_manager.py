@@ -36,6 +36,7 @@ class FakeKiwoomConnection:
         self.connect_state = connect_state
         self.request_count = 0
         self.request_results: list[int] = []
+        self.finish_count = 0
 
     def get_connect_state(self) -> int:
         return self.connect_state
@@ -45,6 +46,9 @@ class FakeKiwoomConnection:
         if self.request_results:
             return self.request_results.pop(0)
         return 0
+
+    def finish_connect_attempt(self) -> None:
+        self.finish_count += 1
 
 
 class KiwoomConnectionManagerTests(unittest.TestCase):
@@ -157,6 +161,7 @@ class KiwoomConnectionManagerTests(unittest.TestCase):
         manager.start()
         self.clock.advance(5)
         manager.tick()
+        self.assertEqual(connection.finish_count, 1)
         self.assertEqual(manager.state, ConnectionState.RECONNECT_WAIT)
         self.assertEqual(connection.request_count, 1)
         self.clock.advance(100)

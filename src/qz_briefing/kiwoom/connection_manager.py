@@ -86,6 +86,7 @@ class KiwoomConnectionManager:
 
     def stop(self) -> None:
         if self._state is ConnectionState.STOPPED: return
+        self._finish_connect_attempt()
         self._started = False; self._request_in_flight = False
         self._reconnect_due_at = self._recheck_due_at = self._login_deadline = None
         self._transition(ConnectionState.SHUTTING_DOWN, "connection manager shutting down")
@@ -135,6 +136,7 @@ class KiwoomConnectionManager:
         if result != 0: self._schedule_reconnect(f"connection request rejected: {result}")
 
     def _schedule_reconnect(self, reason: str) -> None:
+        self._finish_connect_attempt()
         self._request_in_flight = False; self._login_deadline = self._recheck_due_at = None
         if self._reconnect_attempts >= self._config.max_reconnect_attempts:
             print("automatic reconnect exhausted", flush=True); self._fail("automatic reconnect exhausted"); return
@@ -145,15 +147,22 @@ class KiwoomConnectionManager:
         print(f"automatic reconnect scheduled in {delay:g} seconds", flush=True)
 
     def _fail(self, reason: str) -> None:
+        self._finish_connect_attempt()
         self._request_in_flight = False; self._login_deadline = self._reconnect_due_at = self._recheck_due_at = None
         self._transition(ConnectionState.FAILED, reason)
 
     def _mark_connected(self, reason: str) -> None:
+        self._finish_connect_attempt()
         recovered = self._reconnect_attempts > 0
         self._request_in_flight = False; self._reconnect_attempts = 0
         self._login_deadline = self._reconnect_due_at = self._recheck_due_at = None
         self._last_check_at = self._clock(); self._transition(ConnectionState.CONNECTED, reason)
         if recovered: print("automatic reconnect succeeded", flush=True)
+
+    def _finish_connect_attempt(self) -> None:
+        finish = getattr(self._connection, "finish_connect_attempt", None)
+        if callable(finish):
+            finish()
 
     def _read_connect_state(self, context: str) -> int | None:
         try: state = int(self._connection.get_connect_state())

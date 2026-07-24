@@ -23,11 +23,16 @@ class KiwoomTrClosedError(KiwoomTrError):
     pass
 
 
+class KiwoomTrInputError(KiwoomTrError):
+    pass
+
+
 # The installed local ENC/legend files do not publish a numeric rate limit.
 # Use a conservative, configurable process-wide operating default.
 DEFAULT_TR_INTERVAL_MS = 1_000
 DEFAULT_OVERLOAD_BACKOFF_MS = (3_000, 7_000, 15_000)
 OVERLOAD_ERROR_CODE = -200
+INPUT_ERROR_CODE = -300
 
 LOGGER = logging.getLogger(__name__)
 
@@ -90,6 +95,7 @@ class TrRequest:
     repeat: bool = False
     paginate: bool = False
     max_pages: int = 20
+    max_rows: int | None = None
 
 
 TrResult: TypeAlias = dict[str, str] | list[dict[str, str]]
@@ -158,6 +164,10 @@ class KiwoomTrRequestQueue:
         self._last_response_at: float | None = None
         self._consecutive_timeouts = 0
         self._timeout_observer = timeout_observer
+        self._dispatch_count = 0
+        self._overload_count = 0
+        self._retry_dispatch_count = 0
+        self._page_count = 0
         self._pending: deque[_QueuedRequest] = deque()
         self._active: _QueuedRequest | None = None
         self._closed = False
@@ -174,7 +184,7 @@ class KiwoomTrRequestQueue:
 
     @property
     def progress(self) -> dict[str, object]:
-        return {"last_request_started_at": self._last_request_started_at, "last_response_at": self._last_response_at, "active_request": self._active.request.request_name if self._active else None, "consecutive_timeouts": self._consecutive_timeouts, "pending_count": self.pending_count}
+        return {"last_request_started_at": self._last_request_started_at, "last_response_at": self._last_response_at, "active_request": self._active.request.request_name if self._active else None, "consecutive_timeouts": self._consecutive_timeouts, "pending_count": self.pending_count, "dispatch_count": self._dispatch_count, "overload_count": self._overload_count, "retry_dispatch_count": self._retry_dispatch_count, "page_count": self._page_count}
 
     def set_timeout_observer(self, observer: Callable[[int], None] | None) -> None:
         self._timeout_observer = observer
@@ -313,6 +323,9 @@ class KiwoomTrRequestQueue:
             queued.dispatch_timer.stop()
             queued.dispatch_timer = None
         self._last_dispatch_at = self._monotonic()
+        self._dispatch_count += 1
+        if queued.previous_next == 2 or queued.retry_count:
+            self._retry_dispatch_count += 1
         self._last_request_started_at = self._last_dispatch_at
         result = self._adapter.request_tr(
             queued.request.request_name,
@@ -320,7 +333,13 @@ class KiwoomTrRequestQueue:
             queued.previous_next,
             queued.screen_no or "",
         )
+        if result == INPUT_ERROR_CODE:
+            self._finish_error(KiwoomTrInputError(
+                f"input_error: CommRqData rejected {queued.request.request_name}; inputs={dict(queued.request.inputs)}"
+            ))
+            return
         if result == OVERLOAD_ERROR_CODE:
+            self._overload_count += 1
             LOGGER.warning("TR overload detected: %s", queued.request.request_name)
             if queued.retry_count >= len(self._overload_backoff_ms):
                 LOGGER.error("TR retry exhausted: %s", queued.request.request_name)
@@ -379,10 +398,12 @@ class KiwoomTrRequestQueue:
                     for index in range(row_count)
                 ]
                 if request.paginate:
+                    self._page_count += 1
                     active.rows = (active.rows or []) + data
                     active.page_count += 1
                     previous_next = str(arguments[4]).strip() if len(arguments) > 4 else "0"
-                    if previous_next == "2":
+                    enough_rows = request.max_rows is not None and len(active.rows) >= request.max_rows
+                    if previous_next == "2" and data and not enough_rows:
                         if active.page_count >= request.max_pages:
                             raise KiwoomTrError(
                                 f"TR pagination exceeded {request.max_pages} pages"
@@ -393,7 +414,7 @@ class KiwoomTrRequestQueue:
                         active.retry_count = 0
                         self._schedule_dispatch(active, requested_delay_ms=0)
                         return
-                    data = active.rows
+                    data = active.rows[:request.max_rows] if request.max_rows is not None else active.rows
             else:
                 data = {
                     field: self._adapter.get_comm_data(

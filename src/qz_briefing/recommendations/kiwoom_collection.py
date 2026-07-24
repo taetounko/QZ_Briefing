@@ -56,7 +56,7 @@ class KiwoomDailyDataSource:
 
     @staticmethod
     def request(code: str, target_date: date, max_pages: int=10) -> TrRequest:
-        return TrRequest(f"qz_recommendation_daily_{code}","OPT10081",{"종목코드":code,"기준일자":target_date.strftime('%Y%m%d'),"수정주가구분":"1"},DAILY_FIELDS,repeat=True,paginate=True,max_pages=max_pages)
+        return TrRequest(f"qz_d_{code}","opt10081",{"종목코드":code,"기준일자":target_date.strftime('%Y%m%d'),"수정주가구분":"1"},DAILY_FIELDS,repeat=True,paginate=True,max_pages=max_pages,max_rows=260)
 
     def collect(self, master: StockMasterRecord, target_date: date) -> list[DailyBar]:
         rows=self._queue.request_rows(self.request(master.metadata.code,target_date)); now=self._clock(); output=[]
@@ -77,7 +77,7 @@ class KiwoomInvestorFlowDataSource:
 
     @staticmethod
     def request(code: str, target_date: date, max_pages: int=3) -> TrRequest:
-        return TrRequest(f"qz_recommendation_flow_{code}","OPT10059",{"일자":target_date.strftime('%Y%m%d'),"종목코드":code,"금액수량구분":"1","매매구분":"0","단위구분":"1"},FLOW_FIELDS,repeat=True,paginate=True,max_pages=max_pages)
+        return TrRequest(f"qz_f_{code}","opt10059",{"일자":target_date.strftime('%Y%m%d'),"종목코드":code,"금액수량구분":"1","매매구분":"0","단위구분":"1"},FLOW_FIELDS,repeat=True,paginate=True,max_pages=max_pages,max_rows=20)
 
     def collect(self, master: StockMasterRecord, target_date: date) -> InvestorFlowSnapshot:
         rows=self._queue.request_rows(self.request(master.metadata.code,target_date)); now=self._clock()

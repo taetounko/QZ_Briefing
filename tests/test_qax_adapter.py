@@ -47,6 +47,18 @@ class FakeSignal:
             callback(*arguments)
 
 
+class FakeConfirmationMonitor:
+    def __init__(self) -> None:
+        self.start_count = 0
+        self.stop_count = 0
+
+    def start(self) -> None:
+        self.start_count += 1
+
+    def stop(self) -> None:
+        self.stop_count += 1
+
+
 class FakeQAxWidget:
     def __init__(
         self,
@@ -66,6 +78,8 @@ class FakeQAxWidget:
         self.dynamic_call_calls: list[str] = []
         self.master_names = {"005930": "삼성전자"}
         self.master_prices = {"005930": "+72,500"}
+        self.master_info = {"005930": "시장구분0|코스피;"}
+        self.fail_master_info_codes: set[str] = set()
         self.login_info = {"ACCNO": "12345678;"}
         self.comm_data = {("OPT10001", "stock", 0, "현재가"): " +72,500 "}
         self.dynamic_call_arguments: list[tuple[object, ...]] = []
@@ -90,6 +104,13 @@ class FakeQAxWidget:
             return self.master_names[str(arguments[0])]
         if signature == "GetMasterLastPrice(QString)":
             return self.master_prices[str(arguments[0])]
+        if signature == "GetMasterStockInfo(QString)":
+            return "직접지원|보통주"
+        if signature == "KOA_Functions(QString, QString)":
+            code = str(arguments[1])
+            if code in self.fail_master_info_codes:
+                raise RuntimeError("fixture KOA failure")
+            return self.master_info.get(code, "")
         if signature == "GetLoginInfo(QString)":
             return self.login_info[str(arguments[0])]
         if signature == "SetInputValue(QString, QString)":
@@ -98,6 +119,8 @@ class FakeQAxWidget:
             return 0
         if signature == "GetCommData(QString, QString, int, QString)":
             return self.comm_data[tuple(arguments)]
+        if signature == "GetCommDataEx(QString, QString)":
+            return [["20260724"]]
         raise AssertionError(f"Unexpected dynamicCall signature: {signature}")
 
     def close(self) -> None:
@@ -142,6 +165,42 @@ class KiwoomQAxAdapterTests(unittest.TestCase):
             ["GetMasterCodeName(QString)", "GetMasterLastPrice(QString)"],
         )
 
+    def test_get_comm_data_ex_preserves_raw_chart_rows(self) -> None:
+        widget = FakeQAxWidget()
+        adapter = KiwoomQAxAdapter(widget=widget)
+        self.assertEqual(adapter.get_comm_data_ex("opt10081", "주식일봉차트조회"), [["20260724"]])
+
+    def test_master_stock_info_defaults_to_verified_koa_fallback_without_direct_warning_call(self) -> None:
+        widget = FakeQAxWidget()
+        adapter = KiwoomQAxAdapter(widget=widget)
+        self.assertEqual(adapter.get_master_stock_info("005930"), "시장구분0|코스피;")
+        self.assertEqual(adapter.get_master_stock_info("005930"), "시장구분0|코스피;")
+        self.assertNotIn("GetMasterStockInfo(QString)", widget.dynamic_call_calls)
+        self.assertEqual(widget.dynamic_call_calls.count("KOA_Functions(QString, QString)"), 2)
+
+    def test_explicit_supported_adapter_uses_direct_master_method(self) -> None:
+        widget = FakeQAxWidget()
+        adapter = KiwoomQAxAdapter(widget=widget, master_stock_info_direct_supported=True)
+        self.assertEqual(adapter.get_master_stock_info("005930"), "직접지원|보통주")
+        self.assertEqual(widget.dynamic_call_calls.count("GetMasterStockInfo(QString)"), 1)
+        self.assertNotIn("KOA_Functions(QString, QString)", widget.dynamic_call_calls)
+
+    def test_failed_koa_master_info_returns_missing_and_next_symbol_continues(self) -> None:
+        widget = FakeQAxWidget()
+        widget.fail_master_info_codes.add("005930")
+        widget.master_info["000660"] = "시장구분0|코스피;"
+        adapter = KiwoomQAxAdapter(widget=widget)
+        self.assertEqual(adapter.get_master_stock_info("005930"), "")
+        self.assertEqual(adapter.get_master_stock_info("000660"), "시장구분0|코스피;")
+        self.assertNotIn("GetMasterStockInfo(QString)", widget.dynamic_call_calls)
+
+    def test_koa_master_info_restores_cp949_exposed_as_latin1(self) -> None:
+        widget = FakeQAxWidget()
+        expected = "시장구분0|코스피;"
+        widget.master_info["005930"] = expected.encode("cp949").decode("latin-1")
+        adapter = KiwoomQAxAdapter(widget=widget)
+        self.assertEqual(adapter.get_master_stock_info("005930"), expected)
+
     def test_default_factory_widget_is_not_rebound(self) -> None:
         widget = FakeQAxWidget()
         with patch.object(qax_adapter_module, "_create_qax_widget", return_value=widget):
@@ -184,18 +243,31 @@ class KiwoomQAxAdapterTests(unittest.TestCase):
 
     def test_request_connect_returns_immediate_result(self) -> None:
         widget = FakeQAxWidget(request_result=-1)
-        adapter = KiwoomQAxAdapter(widget=widget)
+        monitor = FakeConfirmationMonitor()
+        adapter = KiwoomQAxAdapter(widget=widget, confirmation_monitor=monitor)
         self.assertEqual(adapter.request_connect(), -1)
         self.assertEqual(widget.dynamic_call_calls, ["CommConnect()"])
+        self.assertEqual((monitor.start_count, monitor.stop_count), (1, 1))
         self.assertEqual(adapter.connect_request_count, 1)
 
     def test_second_request_connect_is_rejected_without_calling_ocx(self) -> None:
         widget = FakeQAxWidget()
-        adapter = KiwoomQAxAdapter(widget=widget)
+        monitor = FakeConfirmationMonitor()
+        adapter = KiwoomQAxAdapter(widget=widget, confirmation_monitor=monitor)
         adapter.request_connect()
         with self.assertRaises(KiwoomConnectionRequestError):
             adapter.request_connect()
         self.assertEqual(widget.dynamic_call_calls, ["CommConnect()"])
+        adapter.finish_connect_attempt()
+        self.assertEqual((monitor.start_count, monitor.stop_count), (1, 1))
+
+    def test_login_event_stops_confirmation_monitor(self) -> None:
+        widget = FakeQAxWidget()
+        monitor = FakeConfirmationMonitor()
+        adapter = KiwoomQAxAdapter(widget=widget, confirmation_monitor=monitor)
+        adapter.request_connect()
+        widget.OnEventConnect.emit(0)
+        self.assertEqual((monitor.start_count, monitor.stop_count), (1, 1))
 
     def test_connection_diagnostics_track_state_and_login_event(self) -> None:
         widget = FakeQAxWidget(connect_state=0)

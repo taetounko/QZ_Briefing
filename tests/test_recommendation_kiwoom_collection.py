@@ -11,6 +11,7 @@ from qz_briefing.recommendations.kiwoom_collection import (
     KiwoomMasterDataSource, merge_daily_cache,
 )
 from qz_briefing.recommendations.request_planner import CollectionMode
+from qz_briefing.recommendations.live_validation import market_limits, resolve_security_type
 
 
 NOW=datetime(2026,7,24,16)
@@ -67,8 +68,9 @@ def test_master_warning_becomes_risk_label_without_exclusion():
 
 def test_daily_request_uses_verified_adjusted_inputs_and_pagination():
     request=KiwoomDailyDataSource.request("800001",date(2026,7,24))
-    assert request.tr_code=="OPT10081" and request.inputs=={"종목코드":"800001","기준일자":"20260724","수정주가구분":"1"}
+    assert request.tr_code.lower()=="opt10081" and request.inputs=={"종목코드":"800001","기준일자":"20260724","수정주가구분":"1"}
     assert request.paginate and request.repeat
+    assert len(request.request_name)<=20
 
 
 def test_daily_response_is_normalized_oldest_first():
@@ -95,7 +97,9 @@ def test_daily_cache_merge_rejects_adjustment_mismatch():
 
 def test_flow_request_uses_verified_inputs_and_only_candidate_code():
     request=KiwoomInvestorFlowDataSource.request("800001",date(2026,7,24))
-    assert request.tr_code=="OPT10059" and request.inputs=={"일자":"20260724","종목코드":"800001","금액수량구분":"1","매매구분":"0","단위구분":"1"}
+    assert request.tr_code.lower()=="opt10059" and request.inputs=={"일자":"20260724","종목코드":"800001","금액수량구분":"1","매매구분":"0","단위구분":"1"}
+    assert len(request.request_name)<=20
+    assert request.max_rows==20
 
 
 def test_flow_values_are_signed_and_chronological():
@@ -152,6 +156,17 @@ def test_collect_requires_mode_and_bounded_symbol_count():
 
 def test_only_read_only_market_tr_codes_are_generated():
     assert ALLOWED_TR_CODES=={"OPT10081","OPT10059"}
+
+
+def test_actual_master_info_shape_resolves_from_metadata_not_name():
+    assert resolve_security_type("800001","시장구분0|코스피;시장구분1|소형주;업종구분|제약;")=="common_stock"
+    assert resolve_security_type("800002","시장구분0|코스피;시장구분1|ETF;업종구분|;")=="etf"
+    assert resolve_security_type("800003","시장구분0|코스닥|중견기업;업종구분||")=="common_stock"
+
+
+def test_live_validation_uses_one_plus_one_then_three_plus_two_limits():
+    assert market_limits(2)==(1,1)
+    assert market_limits(5)==(3,2)
 
 
 class OrchestratorMaster:

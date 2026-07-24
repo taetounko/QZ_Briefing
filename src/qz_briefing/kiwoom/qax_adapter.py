@@ -6,6 +6,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Protocol
 
+from .connection_confirmation import KiwoomConnectionConfirmationMonitor
+
 
 KIWOOM_CONTROL_ID = "KHOPENAPI.KHOpenAPICtrl.1"
 LoginEventListener = Callable[[int], None]
@@ -70,6 +72,11 @@ class QAxWidgetLike(Protocol):
 WidgetFactory = Callable[[], QAxWidgetLike]
 
 
+class ConfirmationMonitorLike(Protocol):
+    def start(self) -> None: ...
+    def stop(self) -> None: ...
+
+
 def _create_qax_widget() -> QAxWidgetLike:
     """Create and bind the real widget exactly as the verified login client does."""
     from PyQt5.QAxContainer import QAxWidget
@@ -84,6 +91,8 @@ class KiwoomQAxAdapter:
         self,
         widget: QAxWidgetLike | None = None,
         widget_factory: WidgetFactory | None = None,
+        confirmation_monitor: ConfirmationMonitorLike | None = None,
+        master_stock_info_direct_supported: bool = False,
     ) -> None:
         if widget is not None and widget_factory is not None:
             raise KiwoomAdapterConfigurationError(
@@ -93,6 +102,11 @@ class KiwoomQAxAdapter:
         uses_default_factory = widget is None and widget_factory is None
         factory = widget_factory or _create_qax_widget
         self._widget = widget if widget is not None else factory()
+        self._confirmation_monitor = confirmation_monitor or KiwoomConnectionConfirmationMonitor()
+        # The installed KHOpenAPI control does not expose GetMasterStockInfo as
+        # a direct method. Keep that verified capability for this instance so
+        # unsupported dynamicCall warnings are never repeated per symbol.
+        self._master_stock_info_direct_supported = bool(master_stock_info_direct_supported)
         self._listeners: list[LoginEventListener] = []
         self._tr_data_listeners: list[TrDataListener] = []
         self._real_data_listeners: list[RealDataListener] = []
@@ -195,13 +209,22 @@ class KiwoomQAxAdapter:
                 "CommConnect was already requested by this adapter"
             )
         self._connect_request_count += 1
+        self._confirmation_monitor.start()
         try:
             raw_result = self._widget.dynamicCall("CommConnect()")
-            return int(raw_result)
+            result = int(raw_result)
+            if result != 0:
+                self._confirmation_monitor.stop()
+            return result
         except Exception as exc:
+            self._confirmation_monitor.stop()
             raise KiwoomConnectionRequestError(
                 "CommConnect did not return an integer"
             ) from exc
+
+    def finish_connect_attempt(self) -> None:
+        """Stop confirmation monitoring after event, failure, or timeout."""
+        self._confirmation_monitor.stop()
 
     def get_master_code_name(self, code: str) -> str:
         """Return the listed security name using a read-only master query."""
@@ -213,9 +236,15 @@ class KiwoomQAxAdapter:
 
     def get_code_list_by_market(self, market_code: str) -> list[str]:
         """Return listed codes from the local OCX; this is not a CommRqData TR."""
-        self._ensure_open()
-        raw = str(self._widget.dynamicCall("GetCodeListByMarket(QString)", str(market_code)))
+        raw = self.get_raw_code_list_by_market(market_code)
         return sorted({code.strip() for code in raw.split(";") if code.strip()})
+
+    def get_raw_code_list_by_market(self, market_code: str) -> str:
+        """Return the unmodified semicolon-delimited local master response."""
+        self._ensure_open()
+        return str(self._widget.dynamicCall(
+            "GetCodeListByMarket(QString)", str(market_code)
+        ))
 
     def get_master_stock_state(self, code: str) -> str:
         return self._get_required_master_text("GetMasterStockState(QString)", code)
@@ -227,7 +256,21 @@ class KiwoomQAxAdapter:
         return self._get_required_master_text("GetMasterListedStockDate(QString)", code)
 
     def get_master_stock_info(self, code: str) -> str:
-        return self._get_required_master_text("GetMasterStockInfo(QString)", code)
+        self._ensure_open()
+        normalized_code = str(code).strip()
+        value = ""
+        if self._master_stock_info_direct_supported:
+            direct = self._widget.dynamicCall("GetMasterStockInfo(QString)", normalized_code)
+            value = "" if direct is None else str(direct).strip()
+        if not value or value == "None":
+            try:
+                value = str(self._widget.dynamicCall(
+                    "KOA_Functions(QString, QString)", "GetMasterStockInfo", normalized_code
+                ) or "").strip()
+            except Exception:
+                return ""
+        value = _decode_legacy_text(value)
+        return "" if value == "None" else value
 
     def get_login_info(self, tag: str) -> str:
         """Return non-secret login metadata such as the ACCNO account list."""
@@ -281,6 +324,20 @@ class KiwoomQAxAdapter:
         )
         return int(value)
 
+    def get_comm_data_ex(self, tr_code: str, record_name: str) -> list[object]:
+        """Return a chart TR's raw repeated rows during its callback."""
+        self._ensure_open()
+        value = self._widget.dynamicCall(
+            "GetCommDataEx(QString, QString)", tr_code, record_name
+        )
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple)):
+            return list(value)
+        raise KiwoomAdapterConfigurationError(
+            "GetCommDataEx returned an unsupported value"
+        )
+
     def add_tr_data_listener(self, callback: TrDataListener) -> None:
         self._ensure_open()
         if callback not in self._tr_data_listeners:
@@ -321,6 +378,7 @@ class KiwoomQAxAdapter:
         """Disconnect the signal and safely release the widget once."""
         if self._closed:
             return
+        self._confirmation_monitor.stop()
 
         self._closed = True
         if self._signal_connected:
@@ -350,6 +408,7 @@ class KiwoomQAxAdapter:
         self._dispose_widget()
 
     def _handle_login_event(self, raw_error_code: object) -> None:
+        self._confirmation_monitor.stop()
         try:
             error_code = int(raw_error_code)
         except Exception as exc:
@@ -412,3 +471,13 @@ class KiwoomQAxAdapter:
             self._widget.deleteLater()
         except Exception:
             self._cleanup_error_count += 1
+
+
+def _decode_legacy_text(value: str) -> str:
+    """Restore CP949 bytes exposed as Latin-1 characters by some OCX methods."""
+    if not any(0x80 <= ord(character) <= 0xFF for character in value):
+        return value
+    try:
+        return value.encode("latin-1").decode("cp949")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return value

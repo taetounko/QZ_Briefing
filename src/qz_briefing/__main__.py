@@ -131,13 +131,22 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     commands.add_argument("--validate-recommendation-data-pipeline", action="store_true")
     commands.add_argument("--plan-live-recommendation-collection", action="store_true")
     commands.add_argument("--collect-recommendation-data", action="store_true")
+    commands.add_argument("--diagnose-opt10081-live", action="store_true")
+    commands.add_argument("--diagnose-kiwoom-login", action="store_true")
+    commands.add_argument("--validate-live-recommendation-collection", action="store_true")
+    commands.add_argument("--diagnose-opt10059-live", action="store_true")
+    commands.add_argument("--validate-cached-opt10059-candidates", action="store_true")
+    parser.add_argument("--symbol")
     parser.add_argument("--mode", choices=("bootstrap","daily_incremental","repair"))
     parser.add_argument("--max-symbols", type=int)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--price-only", action="store_true")
     parser.add_argument("--remove-secret", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(raw)
     if parsed.remove_secret and not parsed.disable_telegram:
         parser.error("--remove-secret requires --disable-telegram")
+    if parsed.diagnose_opt10081_live and not parsed.symbol:
+        parser.error("--diagnose-opt10081-live requires --symbol")
     return parsed
 
 
@@ -466,6 +475,39 @@ def run(
         except ValueError as exc:
             print(f"COLLECTION BLOCKED: {exc}")
             return 2
+    if options.diagnose_opt10081_live:
+        from qz_briefing.recommendations.opt10081_diagnostic import print_diagnostic, run_opt10081_diagnostic
+        try:
+            result = run_opt10081_diagnostic(project_root, options.symbol)
+        except (RuntimeError, ValueError) as exc:
+            print(f"LIVE DIAGNOSTIC FAILED: {exc}")
+            return 2
+        return 0 if print_diagnostic(result) else 1
+    if options.diagnose_kiwoom_login:
+        from qz_briefing.kiwoom.login_diagnostic import print_login_diagnostic, run_login_diagnostic
+        result = run_login_diagnostic()
+        return 0 if print_login_diagnostic(result) else 1
+    if options.validate_live_recommendation_collection:
+        from qz_briefing.recommendations.live_validation import print_live_summary, run_live_validation
+        try:
+            result = run_live_validation(project_root, max_symbols=options.max_symbols or 5, collect_flow=not options.price_only)
+        except (RuntimeError, ValueError) as exc:
+            print(f"LIVE RECOMMENDATION VALIDATION FAILED: {exc}")
+            return 2
+        return 0 if print_live_summary(result) else 1
+    if options.diagnose_opt10059_live:
+        from qz_briefing.recommendations.opt10059_diagnostic import print_opt10059_diagnostic, run_opt10059_diagnostic
+        try:
+            result=run_opt10059_diagnostic(project_root,options.symbol)
+        except (RuntimeError,ValueError) as exc:
+            print(f"OPT10059 LIVE DIAGNOSTIC FAILED: {exc}")
+            return 2
+        return 0 if print_opt10059_diagnostic(result) else 1
+    if options.validate_cached_opt10059_candidates:
+        from qz_briefing.recommendations.opt10059_diagnostic import run_cached_opt10059_candidates
+        result=run_cached_opt10059_candidates(project_root)
+        print(json.dumps(result,ensure_ascii=False,sort_keys=True))
+        return 0 if result["requested"] and result["failed"]==0 else 1
     cli_result = handle_notification_cli(options, project_root)
     if cli_result is not None:
         return cli_result

@@ -238,6 +238,53 @@ def test_paginated_rows_request_continuation_and_finish_once() -> None:
     assert results == [[{"종목번호": "A005930"}, {"종목번호": "A000660"}]]
 
 
+def test_empty_paginated_page_does_not_request_invalid_continuation() -> None:
+    queue, adapter, _ = make_queue()
+    request_value = TrRequest(
+        "daily",
+        "opt10081",
+        {},
+        ("일자",),
+        repeat=True,
+        paginate=True,
+    )
+    adapter.repeat_count = 0
+    results = []
+
+    queue.submit(request_value, results.append, lambda error: None)
+    adapter.respond(previous_next="2")
+
+    assert len(adapter.requests) == 1
+    assert results == [[]]
+
+
+def test_paginated_request_stops_and_trims_after_maximum_rows() -> None:
+    queue, adapter, _ = make_queue()
+    request_value = TrRequest("daily", "opt10081", {}, ("일자",), repeat=True, paginate=True, max_rows=2)
+    adapter.repeat_count = 3
+    adapter.values.update({
+        ("opt10081", "daily", 0, "일자"): "20260724",
+        ("opt10081", "daily", 1, "일자"): "20260723",
+        ("opt10081", "daily", 2, "일자"): "20260722",
+    })
+    results = []
+    queue.submit(request_value, results.append, lambda error: None)
+    adapter.respond(previous_next="2")
+    assert len(adapter.requests) == 1
+    assert results == [[{"일자": "20260724"}, {"일자": "20260723"}]]
+
+
+def test_input_error_is_nonretryable_without_backoff_or_continuation() -> None:
+    queue, adapter, timers = make_queue()
+    adapter.request_results = [-300]
+    errors = []
+    queue.submit(TrRequest("flow", "opt10059", {"매매구분": "invalid"}, ("일자",), repeat=True, paginate=True), lambda rows: None, errors.append)
+    assert len(adapter.requests) == 1
+    assert len(errors) == 1 and "input_error" in str(errors[0])
+    assert not timers
+    assert queue.progress["overload_count"] == 0
+
+
 def test_first_request_is_immediate_and_next_waits_for_global_interval() -> None:
     now = [0.0]
     queue, adapter, timers = make_queue(minimum_interval_ms=1000, monotonic=lambda: now[0])
