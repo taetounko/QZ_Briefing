@@ -128,6 +128,7 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     commands.add_argument("--notification-status", action="store_true")
     commands.add_argument("--validate-unattended-cycle", action="store_true")
     commands.add_argument("--validate-stock-recommendations", action="store_true")
+    commands.add_argument("--validate-recommendation-data-pipeline", action="store_true")
     parser.add_argument("--remove-secret", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(raw)
     if parsed.remove_secret and not parsed.disable_telegram:
@@ -443,6 +444,11 @@ def run(
         from qz_briefing.recommendations.validation import print_stock_validation, validate_stock_recommendations
         result = validate_stock_recommendations()
         print_stock_validation(result)
+        return 0 if result["success"] else 1
+    if options.validate_recommendation_data_pipeline:
+        from qz_briefing.recommendations.data_validation import print_recommendation_data_validation, validate_recommendation_data_pipeline
+        result = validate_recommendation_data_pipeline()
+        print_recommendation_data_validation(result)
         return 0 if result["success"] else 1
     cli_result = handle_notification_cli(options, project_root)
     if cli_result is not None:
