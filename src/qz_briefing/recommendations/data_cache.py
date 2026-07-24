@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from dataclasses import asdict, is_dataclass
+from datetime import date
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -22,7 +24,7 @@ class CacheRead:
 
 
 class RecommendationDataCache:
-    KINDS = ("master", "daily", "weekly", "flow", "features", "snapshots", "failures")
+    KINDS = ("master", "daily", "weekly", "flow", "features", "snapshots", "failures", "checkpoints")
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
@@ -33,7 +35,7 @@ class RecommendationDataCache:
 
     def save(self, kind: str, key: str, data: object, *, as_of: datetime, source: str) -> Path:
         path=self.path(kind,key); path.parent.mkdir(parents=True,exist_ok=True)
-        payload={"schema_version":SCHEMA_VERSION,"as_of":as_of.isoformat(),"updated_at":datetime.now().isoformat(),"source":source,"data":data}
+        payload={"schema_version":SCHEMA_VERSION,"as_of":as_of.isoformat(),"updated_at":datetime.now().isoformat(),"source":source,"data":_json_value(data)}
         descriptor,raw=tempfile.mkstemp(dir=path.parent,prefix=f".{path.name}.",suffix=".tmp")
         temporary=Path(raw)
         try:
@@ -57,3 +59,12 @@ class RecommendationDataCache:
             try: os.replace(path,quarantine)
             except OSError: pass
             return CacheRead(None,False,False,f"corrupt cache ignored: {type(exc).__name__}")
+
+
+def _json_value(value: object) -> object:
+    if is_dataclass(value): return _json_value(asdict(value))
+    if isinstance(value,(datetime,date)): return value.isoformat()
+    if isinstance(value,dict): return {str(key):_json_value(item) for key,item in value.items()}
+    if isinstance(value,(list,tuple)): return [_json_value(item) for item in value]
+    if isinstance(value,(str,int,float,bool)) or value is None: return value
+    raise TypeError(f"unsupported cache value: {type(value).__name__}")

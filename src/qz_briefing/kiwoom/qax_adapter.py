@@ -211,6 +211,24 @@ class KiwoomQAxAdapter:
         """Return the raw reference/previous-close price master value."""
         return self._get_required_master_text("GetMasterLastPrice(QString)", code)
 
+    def get_code_list_by_market(self, market_code: str) -> list[str]:
+        """Return listed codes from the local OCX; this is not a CommRqData TR."""
+        self._ensure_open()
+        raw = str(self._widget.dynamicCall("GetCodeListByMarket(QString)", str(market_code)))
+        return sorted({code.strip() for code in raw.split(";") if code.strip()})
+
+    def get_master_stock_state(self, code: str) -> str:
+        return self._get_required_master_text("GetMasterStockState(QString)", code)
+
+    def get_master_construction(self, code: str) -> str:
+        return self._get_required_master_text("GetMasterConstruction(QString)", code)
+
+    def get_master_listed_stock_date(self, code: str) -> str:
+        return self._get_required_master_text("GetMasterListedStockDate(QString)", code)
+
+    def get_master_stock_info(self, code: str) -> str:
+        return self._get_required_master_text("GetMasterStockInfo(QString)", code)
+
     def get_login_info(self, tag: str) -> str:
         """Return non-secret login metadata such as the ACCNO account list."""
         self._ensure_open()

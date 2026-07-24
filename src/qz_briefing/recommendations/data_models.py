@@ -28,6 +28,9 @@ class StockMasterRecord:
     tradable: bool = True
     trading_status: str = "normal"
     risk_labels: tuple[str, ...] = ()
+    listed_date: date | None = None
+    reference_price: float | None = None
+    raw_state: str = ""
 
 
 @dataclass(frozen=True)

@@ -129,6 +129,11 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     commands.add_argument("--validate-unattended-cycle", action="store_true")
     commands.add_argument("--validate-stock-recommendations", action="store_true")
     commands.add_argument("--validate-recommendation-data-pipeline", action="store_true")
+    commands.add_argument("--plan-live-recommendation-collection", action="store_true")
+    commands.add_argument("--collect-recommendation-data", action="store_true")
+    parser.add_argument("--mode", choices=("bootstrap","daily_incremental","repair"))
+    parser.add_argument("--max-symbols", type=int)
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--remove-secret", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(raw)
     if parsed.remove_secret and not parsed.disable_telegram:
@@ -450,6 +455,17 @@ def run(
         result = validate_recommendation_data_pipeline()
         print_recommendation_data_validation(result)
         return 0 if result["success"] else 1
+    if options.plan_live_recommendation_collection:
+        from qz_briefing.recommendations.collection_orchestrator import print_plan_modes
+        print_plan_modes(max_symbols=options.max_symbols)
+        return 0
+    if options.collect_recommendation_data:
+        from qz_briefing.recommendations.collection_orchestrator import run_collection_dry_run
+        try:
+            return run_collection_dry_run(options.mode,max_symbols=options.max_symbols,dry_run=options.dry_run)
+        except ValueError as exc:
+            print(f"COLLECTION BLOCKED: {exc}")
+            return 2
     cli_result = handle_notification_cli(options, project_root)
     if cli_result is not None:
         return cli_result
