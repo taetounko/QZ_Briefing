@@ -225,6 +225,8 @@ def test_valid_flow_catalyst_and_risks_convert_without_fabrication():
     risk=RiskEvent(meta,"managed",.5,AS_OF-timedelta(days=1),None,False,7,"관리 위험")
     converted=to_recommendation_features(RecommendationDataBundle(item,normalized,weekly,compute_price_features(normalized,AS_OF),flow,None,(),(catalyst,),(risk,)))
     assert converted.fund_inflow is not None and converted.catalyst_strength==.9
+    assert converted.fund_flow_status=="partial" and converted.fund_flow_score is not None
+    assert evaluate_candidate(converted).components["fund_inflow"]==converted.fund_flow_score
     assert converted.risks[0].deduction==7 and evaluate_candidate(converted).eligible
 
 

@@ -58,6 +58,21 @@ class RecommendationFeatures:
     missing: tuple[str, ...] = ()
     preferred_entry: str = "관찰 우선"
     invalidation_conditions: tuple[str, ...] = ()
+    foreign_net_5d: float | None = None
+    foreign_net_20d: float | None = None
+    institution_net_5d: float | None = None
+    institution_net_20d: float | None = None
+    foreign_buy_days_5d: int = 0
+    institution_buy_days_5d: int = 0
+    foreign_normalized_5d: float | None = None
+    foreign_normalized_20d: float | None = None
+    institution_normalized_5d: float | None = None
+    institution_normalized_20d: float | None = None
+    joint_buy_5d: bool = False
+    flow_acceleration: float | None = None
+    fund_flow_score: float | None = None
+    fund_flow_reasons: tuple[str, ...] = ()
+    fund_flow_status: str = "data_unavailable"
     horizon: str = "단기·스윙"
 
 

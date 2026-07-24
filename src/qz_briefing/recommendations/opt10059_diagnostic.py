@@ -15,6 +15,7 @@ from qz_briefing.runtime.unattended import atomic_write_json
 from .collection_orchestrator import collection_paths
 from .kiwoom_collection import FLOW_FIELDS, KiwoomInvestorFlowDataSource
 from .live_validation import _ensure_connected
+from .fund_flow import compute_fund_flow_score
 
 
 OPT10059_ALLOWED = {
@@ -71,7 +72,8 @@ def run_cached_opt10059_candidates(project_root:Path)->dict[str,object]:
             try:
                 rows=queue.request_rows(request)
                 present=[field for field in FLOW_FIELDS if any(str(row.get(field,"")).strip() for row in rows)]
-                item={**base,"status":"PASS" if len(rows)>=5 else "INSUFFICIENT_ROWS","comm_rq_data_return_code":0,"response_rows":len(rows),"actual_output_fields":present,"missing_output_fields":[field for field in FLOW_FIELDS if field not in present],"metrics":signed_flow_metrics(rows)}
+                scored=scored_flow_rows(root,code,rows)
+                item={**base,"status":"PASS" if len(rows)>=5 else "INSUFFICIENT_ROWS","comm_rq_data_return_code":0,"response_rows":len(rows),"actual_output_fields":present,"missing_output_fields":[field for field in FLOW_FIELDS if field not in present],"metrics":signed_flow_metrics(rows),"fund_flow":scored.__dict__}
             except KiwoomTrInputError as exc:
                 item={**base,"status":"INPUT_ERROR","comm_rq_data_return_code":-300,"error":str(exc),"response_rows":0}
             results.append(item)
@@ -104,6 +106,17 @@ def signed_flow_metrics(rows: list[dict[str,str]]) -> dict[str,object]:
     }
 
 
+def _cached_average_trading_value(root:Path,code:str)->float:
+    payload=json.loads((root/"daily"/f"{code}.json").read_text(encoding="utf-8"))["data"]
+    values=[float(item["trading_value"]) for item in payload[-20:] if item.get("trading_value") is not None]
+    return sum(values)/len(values) if values else 0.0
+
+
+def scored_flow_rows(root:Path,code:str,rows:list[dict[str,str]]):
+    ordered=sorted(rows,key=lambda row:str(row.get("일자","")))
+    return compute_fund_flow_score([row.get("외국인투자자") for row in ordered],[row.get("기관계") for row in ordered],_cached_average_trading_value(root,code))
+
+
 def run_opt10059_diagnostic(project_root:Path, symbol:str|None=None) -> dict[str,object]:
     from PyQt5.QtWidgets import QApplication
     app=QApplication.instance() or QApplication([]); app.setQuitOnLastWindowClosed(False)
@@ -129,8 +142,8 @@ def run_opt10059_diagnostic(project_root:Path, symbol:str|None=None) -> dict[str
         except KiwoomTrInputError as exc:
             result.update({"status":"INPUT_ERROR","comm_rq_data_return_code":-300,"error":str(exc),"continuation_count":0,"retry_count":0}); return result
         present=[field for field in FLOW_FIELDS if any(str(row.get(field,"")).strip() for row in rows)]
-        metrics=signed_flow_metrics(rows)
-        result.update({"status":"PASS" if len(rows)>=5 else "INSUFFICIENT_ROWS","comm_rq_data_return_code":0,"response_rows":len(rows),"actual_output_fields":present,"missing_output_fields":[field for field in FLOW_FIELDS if field not in present],"metrics":metrics,"continuation_count":queue.progress["retry_dispatch_count"],"retry_count":queue.progress["overload_count"]})
+        metrics=signed_flow_metrics(rows); scored=scored_flow_rows(root,symbol,rows)
+        result.update({"status":"PASS" if len(rows)>=5 else "INSUFFICIENT_ROWS","comm_rq_data_return_code":0,"response_rows":len(rows),"actual_output_fields":present,"missing_output_fields":[field for field in FLOW_FIELDS if field not in present],"metrics":metrics,"fund_flow":scored.__dict__,"continuation_count":queue.progress["retry_dispatch_count"],"retry_count":queue.progress["overload_count"]})
         return result
     finally:
         if queue is not None: queue.close()

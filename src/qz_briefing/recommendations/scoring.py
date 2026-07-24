@@ -37,7 +37,7 @@ def evaluate_candidate(features: RecommendationFeatures, policy: RecommendationP
     components = {
         "weekly_settlement": (_weekly_quality(signal) if signal else 0) * policy.weekly_weight,
         "bottom_rebound": _ratio(features.bottom_rebound) * policy.bottom_weight,
-        "fund_inflow": _ratio(features.fund_inflow) * policy.fund_weight,
+        "fund_inflow": min(policy.fund_weight,max(0.0,features.fund_flow_score)) if features.fund_flow_score is not None else _ratio(features.fund_inflow) * policy.fund_weight,
         "daily_trend": _ratio(features.daily_trend) * policy.daily_weight,
         "catalyst": catalyst * policy.catalyst_weight,
         "liquidity": _ratio(features.liquidity) * policy.liquidity_weight,

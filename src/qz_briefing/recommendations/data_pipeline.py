@@ -13,6 +13,7 @@ from .data_models import (
     RecommendationDataBundle, RiskEvent, StockMasterRecord,
 )
 from .models import CatalystEvidence, RecommendationFeatures, RiskFlag, StockUniverseItem, WeeklyBar
+from .fund_flow import compute_fund_flow_score
 
 
 EXCLUDED_SECURITY_TYPES = {"etf", "etn", "reit", "spac", "preferred"}
@@ -167,10 +168,12 @@ def to_recommendation_features(bundle: RecommendationDataBundle) -> Recommendati
     if "position52" in values: bottom=max(0.0,min(1.0,1-float(values["position52"])))
     daily=None
     if all(key in values for key in ("ma5","ma20","ma60")): daily=sum(bool(values.get(key)) for key in ("recovered_ma20","recovered_ma60"))/2
-    flow=None
-    if bundle.investor_flow:
-        series=bundle.investor_flow.foreign_daily+bundle.investor_flow.institution_daily
-        flow=max(0.0,min(1.0,.5+(sum(series)/(abs(sum(series))+1))*.5)) if series else None
+    flow_features=compute_fund_flow_score(
+        bundle.investor_flow.foreign_daily if bundle.investor_flow else (),
+        bundle.investor_flow.institution_daily if bundle.investor_flow else (),
+        values.get("trading_value_avg20"),
+    )
+    flow=flow_features.fund_flow_score/25 if flow_features.fund_flow_status!="data_unavailable" else None
     if flow is None: missing.append("종목별 투자자 수급")
     catalysts=[item for item in bundle.catalysts if item.verified and item.metadata.source and item.announced_at and item.announced_at<=master.metadata.as_of]
     fundamentals=[item for item in bundle.fundamentals if item.metadata.source and item.metadata.updated_at<=master.metadata.as_of]
@@ -192,4 +195,11 @@ def to_recommendation_features(bundle: RecommendationDataBundle) -> Recommendati
         sum(bundle.investor_flow.institution_daily[-5:]) if bundle.investor_flow else None,
         sum(bundle.program_flow.daily_net_buy[-5:]) if bundle.program_flow else None,
         evidence,risks,tuple(sorted(set(missing))),
+        foreign_net_5d=flow_features.foreign_net_5d,foreign_net_20d=flow_features.foreign_net_20d,
+        institution_net_5d=flow_features.institution_net_5d,institution_net_20d=flow_features.institution_net_20d,
+        foreign_buy_days_5d=flow_features.foreign_buy_days_5d,institution_buy_days_5d=flow_features.institution_buy_days_5d,
+        foreign_normalized_5d=flow_features.foreign_normalized_5d,foreign_normalized_20d=flow_features.foreign_normalized_20d,
+        institution_normalized_5d=flow_features.institution_normalized_5d,institution_normalized_20d=flow_features.institution_normalized_20d,
+        joint_buy_5d=flow_features.joint_buy_5d,flow_acceleration=flow_features.flow_acceleration,
+        fund_flow_score=flow_features.fund_flow_score,fund_flow_reasons=flow_features.fund_flow_reasons,fund_flow_status=flow_features.fund_flow_status,
     )
