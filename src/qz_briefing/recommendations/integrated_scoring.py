@@ -186,7 +186,11 @@ def evaluate_preliminary_candidate(
     final = _clip(raw - risk_penalty, 100)
     reasons = weekly_reasons + bottom_reasons + list(features.fund_flow_reasons) + daily_reasons + liquidity_reasons
     flow_status = features.fund_flow_status
-    status = "complete" if flow_status == "complete" and len(bundle.daily_bars) >= 260 else "partial"
+    status = "complete" if (
+        flow_status == "complete"
+        and len(bundle.daily_bars) >= 260
+        and catalyst_status == "complete"
+    ) else "partial"
     risk_status = "clear" if not risk_flags else "flagged"
     trading_value = float(values.get("trading_value_avg20", 0) or 0)
     return PreliminaryRecommendationScore(

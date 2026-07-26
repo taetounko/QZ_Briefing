@@ -128,6 +128,7 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     commands.add_argument("--notification-status", action="store_true")
     commands.add_argument("--validate-unattended-cycle", action="store_true")
     commands.add_argument("--validate-stock-recommendations", action="store_true")
+    commands.add_argument("--validate-integrated-recommendation-pipeline", action="store_true")
     commands.add_argument("--validate-recommendation-data-pipeline", action="store_true")
     commands.add_argument("--plan-live-recommendation-collection", action="store_true")
     commands.add_argument("--collect-recommendation-data", action="store_true")
@@ -458,6 +459,13 @@ def run(
         from qz_briefing.recommendations.validation import print_stock_validation, validate_stock_recommendations
         result = validate_stock_recommendations()
         print_stock_validation(result)
+        return 0 if result["success"] else 1
+    if options.validate_integrated_recommendation_pipeline:
+        from qz_briefing.recommendations.integrated_validation import (
+            print_integrated_recommendation_validation, validate_integrated_recommendation_pipeline,
+        )
+        result = validate_integrated_recommendation_pipeline()
+        print_integrated_recommendation_validation(result)
         return 0 if result["success"] else 1
     if options.validate_recommendation_data_pipeline:
         from qz_briefing.recommendations.data_validation import print_recommendation_data_validation, validate_recommendation_data_pipeline

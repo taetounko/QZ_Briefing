@@ -120,6 +120,7 @@ class RecommendationScore:
     missing: list[str]
     risks: list[str]
     features: RecommendationFeatures
+    preliminary: PreliminaryRecommendationScore | None = None
 
 
 @dataclass(frozen=True)

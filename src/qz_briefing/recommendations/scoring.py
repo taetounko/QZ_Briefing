@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from .features import completed_weekly_signal
+from .data_models import RecommendationDataBundle
+from .data_pipeline import to_recommendation_features
+from .integrated_scoring import evaluate_preliminary_candidate
 from .models import RecommendationFeatures, RecommendationPolicy, RecommendationScore
 
 
@@ -21,6 +24,7 @@ def _weekly_quality(signal) -> float:
 
 
 def evaluate_candidate(features: RecommendationFeatures, policy: RecommendationPolicy | None = None) -> RecommendationScore:
+    """Legacy feature-only facade retained for offline compatibility checks."""
     policy = policy or RecommendationPolicy()
     item = features.item
     exclusions: list[str] = []
@@ -58,4 +62,39 @@ def evaluate_candidate(features: RecommendationFeatures, policy: RecommendationP
         total_score=round(total,2), confidence=_ratio(features.confidence),
         reasons=reasons, missing=missing, risks=[flag.reason for flag in features.risks],
         features=features,
+    )
+
+
+def evaluate_integrated_bundle(bundle: RecommendationDataBundle) -> RecommendationScore:
+    """Adapt the single integrated score into the established report contract."""
+    preliminary = evaluate_preliminary_candidate(bundle)
+    features = to_recommendation_features(bundle)
+    signal = completed_weekly_signal(features.weekly_bars, features.as_of)
+    components = {
+        "weekly_settlement": preliminary.weekly_score,
+        "bottom_rebound": preliminary.bottom_reversal_score,
+        "fund_inflow": preliminary.fund_flow_score,
+        "daily_trend": preliminary.daily_trend_score,
+        "catalyst": preliminary.catalyst_score,
+        "liquidity": preliminary.liquidity_score,
+    }
+    missing = list(features.missing)
+    if preliminary.catalyst_status == "not_evaluated":
+        missing.append("검증된 재료·실적 자료 부족")
+    exclusions = [] if preliminary.weekly_filter_passed else [preliminary.weekly_filter_reason]
+    return RecommendationScore(
+        item=preliminary.item,
+        eligible=preliminary.weekly_filter_passed,
+        exclusion_reasons=exclusions,
+        weekly=signal,
+        components=components,
+        gross_score=preliminary.raw_total_score,
+        risk_deduction=preliminary.risk_penalty,
+        total_score=preliminary.final_total_score,
+        confidence=_ratio(features.confidence),
+        reasons=list(preliminary.score_reasons),
+        missing=list(dict.fromkeys(missing)),
+        risks=list(preliminary.risk_flags),
+        features=features,
+        preliminary=preliminary,
     )

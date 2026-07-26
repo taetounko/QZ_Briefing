@@ -10,7 +10,7 @@ from typing import Protocol
 from .data_models import CollectionFailure, RecommendationDataBundle, StockMasterRecord
 from .data_cache import RecommendationDataCache
 from .data_pipeline import aggregate_weekly_bars, compute_price_features, normalize_daily_bars, to_recommendation_features, universe_decision, weekly_ma5_metrics
-from .selector import select_recommendations
+from .selector import select_integrated_recommendations
 from .request_planner import CacheState, CollectionMode, CollectionPolicy, PreliminaryCandidate, RequestPlan, build_request_plan
 
 
@@ -76,8 +76,9 @@ class RecommendationCollectionOrchestrator:
                 bundles[code]=RecommendationDataBundle(**{**bundles[code].__dict__,"investor_flow":flow})
                 if self.cache: self.cache.save("flow",code,flow,as_of=self.clock(),source="Kiwoom OPT10059 amount")
             except Exception as exc: failures.append(CollectionFailure(code,"flow",f"{type(exc).__name__}: {exc}",self.clock()))
-        features=[to_recommendation_features(bundles[code]) for code in sorted(bundles)]
-        report=select_recommendations(features)
+        ordered_bundles=[bundles[code] for code in sorted(bundles)]
+        features=[to_recommendation_features(bundle) for bundle in ordered_bundles]
+        report=select_integrated_recommendations(ordered_bundles)
         if self.cache:
             self.cache.save("snapshots",target_date.isoformat(),{"features":features,"selected":{"strong":len(report.strong),"review":len(report.review)}},as_of=self.clock(),source="recommendation collection")
             self.cache.save("failures",target_date.isoformat(),failures,as_of=self.clock(),source="recommendation collection")

@@ -14,6 +14,8 @@ def render_recommendations(report: DailyRecommendationReport) -> str:
         for recommendation in rows:
             score=recommendation.score; signal=score.weekly; features=score.features
             lines += ["",f"{recommendation.rank}. {score.item.name}({score.item.code}) — {score.total_score:.2f}점",f"- 시장: {score.item.market} / 데이터 신뢰도: {score.confidence:.0%}"]
+            if score.preliminary is not None:
+                lines.append(f"- 추천 등급: {recommendation.grade} / 평가 상태: {score.preliminary.evaluation_status}")
             if signal: lines.append(f"- 마지막 완성 주봉 종가 {signal.weekly_close:,.2f} / 5주선 {signal.weekly_ma5:,.2f} / 이격 {signal.distance_rate:+.2f}% / 연속 {signal.consecutive_weeks}주")
             if signal:
                 slope = f"{signal.ma5_slope_rate:+.2f}%" if signal.ma5_slope_rate is not None else "산출 자료 부족"
@@ -38,6 +40,8 @@ def render_recommendations(report: DailyRecommendationReport) -> str:
             lines.append(f"- 추격매수 금지: {'예' if score.risk_deduction >= 10 else '아니오'} / 선호 진입: {features.preferred_entry or '관찰 우선'}")
             lines.append("- 무효화 조건: "+(", ".join(features.invalidation_conditions) or "5주선 재이탈 여부 확인"))
             lines.append(f"- 관점: {features.horizon or '단기·스윙'}")
+            if score.preliminary is not None:
+                lines.append("- 데이터 출처 요약: 저장된 Kiwoom 일봉·완성 주봉·투자자 수급 평가 입력")
             lines.append(f"- 한 줄 요약: {', '.join(LABELS.get(reason,reason) for reason in score.reasons[:2]) or '추가 확인이 필요한 후보'} 중심의 조건부 후보입니다.")
     if report.excluded:
         lines += ["","## 제외 종목"]+[f"- {row['name']}({row['code']}): {row['reason']}" for row in report.excluded]
