@@ -59,6 +59,17 @@ def format_briefing(result: dict[str, object]) -> str:
         leaders.extend(value for value in section_values if isinstance(value,dict))
     if leaders:
         lines += ["", "주도주·반등 후보:"] + [f"- {item.get('name') or '종목명 미확인'}({item.get('code') or '코드 미확인'}): {item.get('score') if item.get('score') is not None else '점수 자료 부족'}" for item in leaders[:5]]
+    recommendations=result.get("daily_recommendations") if isinstance(result.get("daily_recommendations"),dict) else {}
+    strong=as_list(recommendations.get("strong")); review=as_list(recommendations.get("review"))
+    if strong:
+        lines += ["", "[오늘의 최우선 후보]"]
+        for item in strong[:3]:
+            if isinstance(item,dict): lines.append(f"- {item.get('name') or '종목명 미확인'}({item.get('code') or '코드 미확인'}) {display(item.get('total_score'))}점 / {', '.join(as_list(item.get('reasons'))[:2]) or '근거 자료 부족'} / 위험: {(as_list(item.get('risks'))[:1] or ['확인된 중대 위험 없음'])[0]} / 추격금지: {'예' if item.get('chase_buying_prohibited') else '아니오'}")
+    if review:
+        lines += ["", "[추가 검토 후보]"]
+        for item in review[:3]:
+            if isinstance(item,dict): lines.append(f"- {item.get('name') or '종목명 미확인'}({item.get('code') or '코드 미확인'}) {display(item.get('total_score'))}점 / 확인: {', '.join(as_list(item.get('missing'))[:2]) or '조건 유지 확인'}")
+    if recommendations and not strong and not review: lines += ["", "오늘은 주봉 5주선 및 종합 기준을 충족한 추천 후보가 없습니다."]
     lines += ["","확정적인 매수·매도 지시가 아니며 조건 확인용입니다.",f"생성시각: {display(result.get('completed_at'), '-')}"]
     return mask_sensitive("\n".join(lines))
 

@@ -89,11 +89,25 @@ def render_markdown(result: dict[str, object]) -> str:
     lines.extend(f"- {error}" for error in errors) if errors else lines.append("- 수집 오류 없음")
     lines.extend(render_leadership(result.get("leadership")))
     lines.extend(render_holdings(result.get("holdings_analysis")))
+    lines.extend(render_daily_recommendations(result.get("daily_recommendations")))
     if result.get("briefing_type") == "market_close":
         lines.extend(render_market_close(result))
     elif result.get("briefing_type") == "pre_market":
         lines.extend(render_previous_market_close(result.get("previous_market_close")))
     return "\n".join(lines) + "\n"
+
+
+def render_daily_recommendations(value: object) -> list[str]:
+    if not isinstance(value,dict): return ["", "## 일일 추천 후보", "", "- 확인 가능한 확정 추천 자료가 없습니다."]
+    lines=["", "## 일일 추천 후보", "", f"- 평가 시각: {value.get('evaluated_at') or '확인 자료 부족'}", "- 확정 추천은 장마감 기준이며 장전·10시에는 순위와 등급을 재계산하지 않습니다."]
+    for title,key in (("완전 강추","strong"),("강추·추가 검토","review")):
+        rows=value.get(key) if isinstance(value.get(key),list) else []
+        lines += ["",f"### {title}"]
+        if not rows: lines.append("- 기준 충족 후보 없음")
+        for row in rows[:3]:
+            if isinstance(row,dict): lines.append(f"- {row.get('name') or '종목명 미확인'}({row.get('code') or '코드 미확인'}): {row.get('total_score') if row.get('total_score') is not None else '점수 자료 부족'}점 / {', '.join(row.get('reasons',[])[:2]) or '근거 자료 부족'}")
+    for warning in value.get("warnings",[]) if isinstance(value.get("warnings"),list) else []: lines.append(f"- 주의: {warning}")
+    return lines
 
 
 def render_market_close(result: dict[str, object]) -> list[str]:

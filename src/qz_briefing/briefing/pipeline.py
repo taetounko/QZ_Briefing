@@ -37,11 +37,13 @@ class DailyBriefingPipeline:
         *,
         clock: Callable[[], datetime] = datetime.now,
         preopen_monitoring: Callable[[], dict[str, object]] | None = None,
+        recommendation_provider: Callable[[str, date], dict[str, object] | None] | None = None,
     ) -> None:
         self._storage = storage
         self._collectors = tuple(collectors)
         self._clock = clock
         self._preopen_monitoring = preopen_monitoring
+        self._recommendation_provider = recommendation_provider
         self._in_progress: set[tuple[date, BriefingType, bool]] = set()
         self._completed: set[tuple[date, BriefingType]] = set()
         self._completion_listeners: list[Callable[[str, str], None]] = []
@@ -287,6 +289,13 @@ class DailyBriefingPipeline:
                 result["previous_market_close"] = previous_close
                 if warning:
                     context.warnings.append(warning)
+            if self._recommendation_provider is not None:
+                try:
+                    recommendations=self._recommendation_provider(briefing_type.value,trading_date)
+                    if recommendations is not None: result["daily_recommendations"]=recommendations
+                    else: context.warnings.append("추천 자료가 없어 기존 브리핑을 계속합니다.")
+                except Exception as exc:
+                    context.warnings.append(f"추천 자료 연결 실패: {type(exc).__name__}")
             save = self._storage.save_validation if manual_validation else self._storage.save
             json_path, markdown_path = save(
                 trading_date, briefing_type, result, render_markdown(result)
