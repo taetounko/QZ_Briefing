@@ -520,6 +520,12 @@ def run(
         return 2
 
     now = clock()
+    if now.time() >= time(20, 0):
+        application = application_factory(sys.argv if arguments is None else arguments)
+        shutdown_controller = shutdown_controller_factory(application, process_lock)
+        application.aboutToQuit.connect(shutdown_controller.handle_application_quit)
+        shutdown_controller.schedule()
+        return 0
     trading_day = market_day_checker(now.date())
     print(
         "TRADING DAY "

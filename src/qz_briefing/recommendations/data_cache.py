@@ -10,6 +10,7 @@ from datetime import date
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from collections.abc import Callable
 
 
 SCHEMA_VERSION = 1
@@ -26,8 +27,9 @@ class CacheRead:
 class RecommendationDataCache:
     KINDS = ("master", "daily", "weekly", "flow", "features", "snapshots", "failures", "checkpoints")
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, clock: Callable[[], datetime] = datetime.now) -> None:
         self.root = Path(root)
+        self._clock = clock
 
     def path(self, kind: str, key: str) -> Path:
         if kind not in self.KINDS: raise ValueError(f"unsupported cache kind: {kind}")
@@ -35,7 +37,10 @@ class RecommendationDataCache:
 
     def save(self, kind: str, key: str, data: object, *, as_of: datetime, source: str) -> Path:
         path=self.path(kind,key); path.parent.mkdir(parents=True,exist_ok=True)
-        payload={"schema_version":SCHEMA_VERSION,"as_of":as_of.isoformat(),"updated_at":datetime.now().isoformat(),"source":source,"data":_json_value(data)}
+        updated_at = self._clock()
+        if (updated_at.tzinfo is None) != (as_of.tzinfo is None):
+            raise ValueError("as_of and cache clock must both be timezone-aware or both naive")
+        payload={"schema_version":SCHEMA_VERSION,"as_of":as_of.isoformat(),"updated_at":updated_at.isoformat(),"source":source,"data":_json_value(data)}
         descriptor,raw=tempfile.mkstemp(dir=path.parent,prefix=f".{path.name}.",suffix=".tmp")
         temporary=Path(raw)
         try:
@@ -52,7 +57,10 @@ class RecommendationDataCache:
         try:
             payload=json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(payload,dict) or payload.get("schema_version")!=SCHEMA_VERSION: raise ValueError("cache schema mismatch")
-            updated=datetime.fromisoformat(str(payload["updated_at"])); stale=now-updated>max_age
+            updated=datetime.fromisoformat(str(payload["updated_at"]))
+            if (updated.tzinfo is None) != (now.tzinfo is None):
+                return CacheRead(payload.get("data"),False,False,"cache timezone mismatch")
+            stale=now-updated>max_age
             return CacheRead(payload.get("data"),not stale,stale,"stale cache" if stale else None)
         except (OSError,ValueError,KeyError,json.JSONDecodeError) as exc:
             quarantine=path.with_name(f"{path.name}.corrupt-{now.strftime('%Y%m%d%H%M%S')}")

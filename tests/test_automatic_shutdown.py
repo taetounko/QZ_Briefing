@@ -220,6 +220,7 @@ def test_entry_point_after_8_pm_exits_without_creating_kiwoom_runtime() -> None:
     def unexpected_adapter() -> object:
         raise AssertionError("Kiwoom adapter must not be created after 20:00")
 
+    now = datetime(2026, 7, 20, 20, 1)
     exit_code = application_run(
         [],
         application_factory=lambda arguments: application,
@@ -229,9 +230,10 @@ def test_entry_point_after_8_pm_exits_without_creating_kiwoom_runtime() -> None:
             app,
             lock,
             timer_factory=lambda: timer,
-            clock=lambda: datetime(2026, 7, 20, 20, 1),
+            clock=lambda: now,
             flush_logs=lambda: events.append("logs.flush"),
         ),
+        clock=lambda: now,
     )
 
     assert exit_code == 0
@@ -270,6 +272,45 @@ def test_calendar_closed_day_exits_before_creating_kiwoom_runtime() -> None:
     assert not adapter_attempted
     assert application.quit_count == 0
     assert process_lock.unlock_count == 1
+
+
+def test_weekend_after_8_pm_uses_the_same_shutdown_clock_and_cleanup() -> None:
+    events: list[str] = []
+    application = FakeApplication(events)
+    process_lock = FakeLock(events)
+    timer = FakeTimer(events)
+    now = datetime(2026, 7, 19, 20, 1)
+    result = application_run(
+        [], application_factory=lambda arguments: application,
+        adapter_factory=lambda: (_ for _ in ()).throw(AssertionError("OCX must not start")),  # type: ignore[arg-type]
+        lock_factory=lambda: process_lock, clock=lambda: now,
+        market_day_checker=lambda day: TradingDayResult(day, MarketStatus.CLOSED, "weekend"),
+        shutdown_controller_factory=lambda app, lock: GracefulShutdownController(
+            app, lock, timer_factory=lambda: timer, clock=lambda: now,
+            flush_logs=lambda: events.append("logs.flush"),
+        ),
+    )
+    assert result == 0 and application.exec_count == 0 and application.quit_count == 1
+    assert process_lock.unlock_count == 1 and "logs.flush" in events
+
+
+def test_confirmed_holiday_after_8_pm_uses_graceful_shutdown() -> None:
+    events: list[str] = []
+    application = FakeApplication(events)
+    process_lock = FakeLock(events)
+    timer = FakeTimer(events)
+    now = datetime(2026, 7, 20, 20, 1)
+    result = application_run(
+        [], application_factory=lambda arguments: application,
+        adapter_factory=lambda: (_ for _ in ()).throw(AssertionError("OCX must not start")),  # type: ignore[arg-type]
+        lock_factory=lambda: process_lock, clock=lambda: now,
+        market_day_checker=lambda day: TradingDayResult(day, MarketStatus.CLOSED, "confirmed holiday"),
+        shutdown_controller_factory=lambda app, lock: GracefulShutdownController(
+            app, lock, timer_factory=lambda: timer, clock=lambda: now,
+            flush_logs=lambda: events.append("logs.flush"),
+        ),
+    )
+    assert result == 0 and application.quit_count == 1 and process_lock.unlock_count == 1
 
 
 def test_ordinary_application_quit_uses_cleanup_without_quitting_again() -> None:

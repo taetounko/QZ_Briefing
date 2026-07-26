@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -238,12 +238,28 @@ def test_hard_risk_becomes_untradable():
 
 
 def test_cache_atomic_roundtrip_staleness_and_corruption(tmp_path):
-    cache=RecommendationDataCache(tmp_path); path=cache.save("daily","800001",{"rows":1},as_of=AS_OF,source="fixture")
+    cache=RecommendationDataCache(tmp_path,clock=lambda: AS_OF); path=cache.save("daily","800001",{"rows":1},as_of=AS_OF,source="fixture")
     assert path.exists() and not list(path.parent.glob("*.tmp"))
     assert cache.load("daily","800001",now=AS_OF,max_age=timedelta(days=1)).fresh
     assert cache.load("daily","800001",now=AS_OF+timedelta(days=2),max_age=timedelta(days=1)).stale
     path.write_text("{bad",encoding="utf-8"); result=cache.load("daily","800001",now=AS_OF,max_age=timedelta(days=1))
     assert result.data is None and list(path.parent.glob("*.corrupt-*"))
+
+
+def test_cache_staleness_boundary_and_injected_clock_are_deterministic(tmp_path):
+    cache=RecommendationDataCache(tmp_path,clock=lambda: AS_OF)
+    cache.save("daily","800001",{"rows":1},as_of=AS_OF,source="fixture")
+    assert cache.load("daily","800001",now=AS_OF+timedelta(days=1),max_age=timedelta(days=1)).fresh
+    assert cache.load("daily","800001",now=AS_OF+timedelta(days=1,seconds=1),max_age=timedelta(days=1)).stale
+
+
+def test_cache_timezone_mismatch_is_reported_without_quarantine(tmp_path):
+    cache=RecommendationDataCache(tmp_path,clock=lambda: AS_OF)
+    path=cache.save("daily","800001",{"rows":1},as_of=AS_OF,source="fixture")
+    aware_now=AS_OF.replace(tzinfo=timezone.utc)
+    result=cache.load("daily","800001",now=aware_now,max_age=timedelta(days=1))
+    assert result.data=={"rows":1} and not result.fresh and not result.stale
+    assert result.warning=="cache timezone mismatch" and path.exists()
 
 
 def test_request_plan_skips_fresh_deduplicates_orders_limits_retry_and_resumes():

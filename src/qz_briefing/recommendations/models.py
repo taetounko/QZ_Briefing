@@ -122,6 +122,30 @@ class RecommendationScore:
     features: RecommendationFeatures
 
 
+@dataclass(frozen=True)
+class PreliminaryRecommendationScore:
+    """Market-data-only score produced before final recommendation grading."""
+
+    item: StockUniverseItem
+    weekly_filter_passed: bool
+    weekly_filter_reason: str
+    weekly_score: float = 0.0
+    bottom_reversal_score: float = 0.0
+    fund_flow_score: float = 0.0
+    daily_trend_score: float = 0.0
+    liquidity_score: float = 0.0
+    catalyst_score: float = 0.0
+    catalyst_status: str = "not_evaluated"
+    risk_penalty: float = 0.0
+    raw_total_score: float = 0.0
+    final_total_score: float = 0.0
+    score_reasons: tuple[str, ...] = ()
+    risk_flags: tuple[str, ...] = ()
+    risk_status: str = "not_evaluated"
+    evaluation_status: str = "excluded"
+    trading_value: float = 0.0
+
+
 @dataclass
 class StockRecommendation:
     rank: int
