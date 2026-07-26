@@ -8,7 +8,7 @@ import argparse
 import getpass
 import json
 from collections.abc import Callable, Sequence
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -471,6 +471,12 @@ def run(
             market_label = "장 종료"
         if dashboard_factory is None:
             print("DASHBOARD STARTUP FAILED", flush=True); return 2
+        def next_open_day(after: date) -> date | None:
+            for offset in range(1, 32):
+                candidate = after + timedelta(days=offset)
+                if market_day_checker(candidate).status is MarketStatus.OPEN:
+                    return candidate
+            return None
         dashboard = dashboard_factory(
             root=project_root / "data" / "briefings",
             recommendation_root=project_root / "data" / "recommendations",
@@ -481,6 +487,7 @@ def run(
             clock=clock,
             read_only=True,
             standalone=True,
+            next_trading_day=next_open_day,
         )
         dashboard.show()
         print("DASHBOARD_STARTED=1 MODE=READ_ONLY", flush=True)

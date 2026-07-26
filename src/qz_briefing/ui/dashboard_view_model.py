@@ -41,6 +41,8 @@ class DashboardViewModel:
             if isinstance(results[name].get("json"), dict)
         ]
         latest = max(valid, key=lambda value: self._completed_key(value["json"]), default=None)
+        premarket = results["pre_market"].get("json")
+        premarket = premarket if isinstance(premarket, dict) else {}
         runtime = self._load_runtime()
         return {
             "date": target.isoformat(), "results": results,
@@ -52,6 +54,10 @@ class DashboardViewModel:
             "messages": self.messages(results),
             "runtime": runtime,
             "recommendations": self._readonly.latest_recommendation(),
+            "premarket_summary": self.summary(premarket),
+            "kospi_leaders": self.market_leaders(premarket, "kospi", "KOSPI"),
+            "kosdaq_leaders": self.market_leaders(premarket, "kosdaq", "KOSDAQ"),
+            "holdings_feedback": {**self.holdings(premarket), "as_of": self._completed_key(premarket)},
         }
 
     def _load_runtime(self) -> dict[str, object]:
@@ -125,6 +131,20 @@ class DashboardViewModel:
             for item in data.get(key, []):
                 if isinstance(item, dict): rows.append({**item, "market": market})
         return rows
+
+    @staticmethod
+    def market_leaders(result: dict[str, object], key: str, market: str) -> list[dict[str, object]]:
+        data = result.get("leadership") if isinstance(result.get("leadership"), dict) else {}
+        rows = data.get(key) if isinstance(data.get(key), list) else []
+        output, seen = [], set()
+        for item in rows:
+            if not isinstance(item, dict): continue
+            code = str(item.get("code") or "").strip()
+            declared = str(item.get("market") or market).upper()
+            if not code or code in seen or declared != market: continue
+            seen.add(code); output.append({**item, "market": market})
+            if len(output) == 10: break
+        return output
 
     @staticmethod
     def watchlist(result: dict[str, object]) -> list[dict[str, object]]:

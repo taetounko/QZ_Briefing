@@ -30,3 +30,13 @@ class TrayController:
 
     def stop(self) -> None:
         self.icon.hide()
+
+
+class DisabledTrayController:
+    """No-op tray used by the standalone read-only window."""
+
+    def notify_background(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
