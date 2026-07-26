@@ -80,14 +80,24 @@ class KiwoomInvestorFlowDataSource:
         return TrRequest(f"qz_f_{code}","opt10059",{"일자":target_date.strftime('%Y%m%d'),"종목코드":code,"금액수량구분":"1","매매구분":"0","단위구분":"1"},FLOW_FIELDS,repeat=True,paginate=True,max_pages=max_pages,max_rows=20)
 
     def collect(self, master: StockMasterRecord, target_date: date) -> InvestorFlowSnapshot:
+        snapshot,_=self.collect_with_rows(master,target_date); return snapshot
+
+    def collect_with_rows(self, master: StockMasterRecord, target_date: date) -> tuple[InvestorFlowSnapshot,dict[str,list[dict[str,object]]]]:
         rows=self._queue.request_rows(self.request(master.metadata.code,target_date)); now=self._clock()
         foreign=[]; institution=[]; missing=False
+        normalized=[]; seen=set()
         for row in sorted(rows,key=lambda value:str(value.get("일자",""))):
+            raw_date=str(row.get("일자","")).strip()
+            try: row_date=datetime.strptime(raw_date,"%Y%m%d").date()
+            except ValueError: continue
+            if row_date>target_date or raw_date in seen: continue
+            seen.add(raw_date)
             foreign_value=normalize_integer(row.get("외국인투자자","")); institution_value=normalize_integer(row.get("기관계",""))
+            normalized.append({"date":raw_date,"foreign":foreign_value,"institution":institution_value})
             if foreign_value is None or institution_value is None: missing=True; continue
             foreign.append(float(foreign_value)); institution.append(float(institution_value))
         meta=DataMetadata(master.metadata.code,master.metadata.name,master.metadata.market,now,"Kiwoom OPT10059 amount",now,True,missing,.8 if missing else 1.0,"missing investor fields" if missing else None)
-        return InvestorFlowSnapshot(meta,tuple(foreign),tuple(institution))
+        return InvestorFlowSnapshot(meta,tuple(foreign),tuple(institution)),{"raw_rows":rows,"normalized_rows":normalized}
 
 
 def merge_daily_cache(cached: tuple[DailyBar,...], collected: list[DailyBar], *, keep: int=260) -> tuple[DailyBar,...]:

@@ -25,7 +25,7 @@ class CacheRead:
 
 
 class RecommendationDataCache:
-    KINDS = ("master", "daily", "weekly", "flow", "features", "snapshots", "failures", "checkpoints")
+    KINDS = ("master", "daily", "weekly", "flow", "flow_raw", "features", "snapshots", "failures", "checkpoints")
 
     def __init__(self, root: Path, *, clock: Callable[[], datetime] = datetime.now) -> None:
         self.root = Path(root)

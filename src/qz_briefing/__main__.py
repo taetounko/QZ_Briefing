@@ -130,6 +130,7 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     commands.add_argument("--validate-stock-recommendations", action="store_true")
     commands.add_argument("--validate-integrated-recommendation-pipeline", action="store_true")
     commands.add_argument("--validate-daily-recommendation-service", action="store_true")
+    commands.add_argument("--validate-live-daily-recommendation", action="store_true")
     commands.add_argument("--validate-recommendation-data-pipeline", action="store_true")
     commands.add_argument("--plan-live-recommendation-collection", action="store_true")
     commands.add_argument("--collect-recommendation-data", action="store_true")
@@ -143,6 +144,9 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     parser.add_argument("--max-symbols", type=int)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--price-only", action="store_true")
+    parser.add_argument("--cached-only", action="store_true")
+    parser.add_argument("--allow-kiwoom-live", action="store_true")
+    parser.add_argument("--force-kiwoom-refresh", action="store_true")
     parser.add_argument("--remove-secret", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(raw)
     if parsed.remove_secret and not parsed.disable_telegram:
@@ -472,6 +476,30 @@ def run(
         from qz_briefing.recommendations.daily_validation import print_daily_recommendation_validation, validate_daily_recommendation_service
         result=validate_daily_recommendation_service(); print_daily_recommendation_validation(result)
         return 0 if result["success"] else 1
+    if options.validate_live_daily_recommendation:
+        if options.max_symbols is None or not 1<=options.max_symbols<=5:
+            print("LIVE DAILY VALIDATION BLOCKED: --max-symbols must be 1..5"); return 2
+        if options.force_kiwoom_refresh and not options.allow_kiwoom_live:
+            print("LIVE DAILY VALIDATION BLOCKED: --force-kiwoom-refresh requires --allow-kiwoom-live"); return 2
+        live_summary=None; cached_result=None
+        if options.allow_kiwoom_live and options.force_kiwoom_refresh:
+            from qz_briefing.recommendations.live_validation import run_live_validation
+            live_summary=run_live_validation(project_root,max_symbols=options.max_symbols,collect_flow=True)
+        elif options.allow_kiwoom_live:
+            from qz_briefing.recommendations.live_daily_validation import run_cached_live_daily_validation
+            cached_result=run_cached_live_daily_validation(project_root,options.max_symbols)
+            if not cached_result.get("success"):
+                from qz_briefing.recommendations.live_validation import run_live_validation
+                live_summary=run_live_validation(project_root,max_symbols=options.max_symbols,collect_flow=True)
+        elif not (options.cached_only or options.allow_kiwoom_live):
+            print("LIVE DAILY VALIDATION BLOCKED: use --cached-only or --allow-kiwoom-live"); return 2
+        from qz_briefing.recommendations.live_daily_validation import print_cached_live_daily_validation,run_cached_live_daily_validation
+        result=cached_result if live_summary is None and cached_result is not None else run_cached_live_daily_validation(project_root,options.max_symbols)
+        if live_summary is not None:
+            live_calls=int(live_summary.get("actual_external_calls",0)); result.update({"cache_hits":0,"cache_misses":0,"live_tr_calls":live_calls,"external_calls":live_calls,"live_master_calls":int(live_summary.get("selected_count",0)),"opt10081_requests":int(live_summary.get("daily_success",0))+int(live_summary.get("daily_failures",0)),"opt10081_successes":int(live_summary.get("daily_success",0)),"opt10081_failures":int(live_summary.get("daily_failures",0)),"opt10059_requests":int(live_summary.get("flow_requested",0)),"opt10059_successes":int(live_summary.get("flow_success",0)),"opt10059_failures":int(live_summary.get("flow_failures",0))})
+            if live_calls<=0: result.update({"success":False,"status":"LIVE_REFRESH_NOT_PERFORMED"})
+        print_cached_live_daily_validation(result)
+        return 0 if result.get("success") else 1
     if options.validate_recommendation_data_pipeline:
         from qz_briefing.recommendations.data_validation import print_recommendation_data_validation, validate_recommendation_data_pipeline
         result = validate_recommendation_data_pipeline()

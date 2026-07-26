@@ -60,7 +60,13 @@ def aggregate_weekly_bars(
     for index, key in enumerate(keys):
         rows = sorted(groups[key], key=lambda row: row.trading_date)
         expected = (week_last_trading_days or {}).get(key)
-        complete = index < len(keys) - 1 or (expected is not None and rows[-1].trading_date == expected and (as_of.date() > expected or as_of.time() >= market_close))
+        if expected is None and rows[-1].trading_date.weekday() == 4:
+            expected = rows[-1].trading_date
+        complete = index < len(keys) - 1 or (
+            expected is not None
+            and rows[-1].trading_date == expected
+            and (as_of.date() > expected or as_of.time() >= market_close)
+        )
         values = [row.trading_value for row in rows]
         meta = rows[-1].metadata
         output.append(AggregatedWeeklyBar(

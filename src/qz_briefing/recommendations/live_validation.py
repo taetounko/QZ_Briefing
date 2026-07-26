@@ -83,7 +83,10 @@ def run_live_validation(project_root: Path, *, max_symbols: int=5, collect_flow:
         flow_codes=sorted({request.code for request in flow_plan.requests if request.kind=="flow"}) if collect_flow else []; flow_metrics={}
         for code in flow_codes:
             try:
-                flow=flow_source.collect(bundles[code].master,target); bundles[code]=RecommendationDataBundle(**{**bundles[code].__dict__,"investor_flow":flow}); cache.save("flow",code,flow,as_of=now,source="Kiwoom OPT10059 amount")
+                pages_before=int(queue.progress["page_count"]); dispatches_before=int(queue.progress["dispatch_count"])
+                flow,row_payload=flow_source.collect_with_rows(bundles[code].master,target); normalized_rows=row_payload["normalized_rows"]; bundles[code]=RecommendationDataBundle(**{**bundles[code].__dict__,"investor_flow":flow}); cache.save("flow",code,flow,as_of=now,source="Kiwoom OPT10059 amount")
+                request_count=int(queue.progress["dispatch_count"])-dispatches_before; page_count=int(queue.progress["page_count"])-pages_before
+                cache.save("flow_raw",code,{"unit":"amount","reference_date":target.isoformat(),"row_count":len(normalized_rows),"first_date":normalized_rows[-1]["date"] if normalized_rows else None,"last_date":normalized_rows[0]["date"] if normalized_rows else None,"request_count":request_count,"continuation_count":max(0,page_count-1),"raw_rows":row_payload["raw_rows"],"rows":normalized_rows},as_of=now,source="Kiwoom OPT10059 raw and normalized rows")
                 flow_metrics[code]={"rows":len(flow.foreign_daily),"foreign":compute_flow_features(flow.foreign_daily),"institution":compute_flow_features(flow.institution_daily),"missing":flow.metadata.missing}
             except Exception as exc: failures.append(CollectionFailure(code,"flow",f"{type(exc).__name__}: {exc}",datetime.now()))
         features=[to_recommendation_features(bundles[code]) for code in sorted(bundles)]
@@ -91,6 +94,7 @@ def run_live_validation(project_root: Path, *, max_symbols: int=5, collect_flow:
         progress=queue.progress
         missing_flow_fields=["외국인투자자","기관계"] if any(value["missing"] for value in flow_metrics.values()) else []
         summary.update({"daily_success":len(bundles),"daily_failures":sum(item.data_kind=="daily" for item in failures),"daily_metrics":daily_metrics,"ma5_evaluable":sum(value["weekly"]!="계산 불가" for value in daily_metrics.values()),"ma5_pass":len(candidates),"flow_requested":len(flow_codes),"flow_success":len(flow_metrics),"flow_failures":sum(item.data_kind=="flow" for item in failures),"flow_metrics":flow_metrics,"confirmed_flow_fields":["일자","외국인투자자","기관계"],"missing_flow_fields":missing_flow_fields,"queue":progress,"cache_checkpoint_saved":True,"recommendation_inputs":len(features)})
+        summary["actual_external_calls"]=int(progress.get("dispatch_count",0))
         fresh_states=[CacheState(code,"daily","fresh") for code in bundles]+[CacheState(code,"flow","fresh") for code in flow_metrics]
         second=build_request_plan(fresh_states,mode=CollectionMode.DAILY_INCREMENTAL,candidates=candidates,universe_codes=[])
         summary["second_plan_network_requests"]=second.network_tr_requests; summary["second_plan_skipped"]=second.cached_requests_skipped
