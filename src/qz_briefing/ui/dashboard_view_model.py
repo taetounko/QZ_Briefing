@@ -9,6 +9,7 @@ from pathlib import Path
 
 from qz_briefing.briefing.rules import derivatives_values, index_rates, spot_flows, stock_rates
 from .formatters import mask_account
+from .readonly_loader import ReadOnlyDashboardLoader
 
 
 RESULT_NAMES = {
@@ -20,14 +21,25 @@ RESULT_NAMES = {
 
 
 class DashboardViewModel:
-    def __init__(self, root: Path, *, clock=datetime.now) -> None:
+    def __init__(self, root: Path, *, recommendation_root: Path | None = None, clock=datetime.now) -> None:
         self.root, self._clock = Path(root), clock
+        self._readonly = ReadOnlyDashboardLoader(
+            self.root, recommendation_root or self.root.parent / "recommendations"
+        )
 
     def load_today(self, target_date: date | None = None) -> dict[str, object]:
         target = target_date or self._clock().date()
         directory = self.root / f"{target.year:04d}" / f"{target.month:02d}" / f"{target.day:02d}"
         results = {name: self._load_pair(directory, *paths[:2], next_time=paths[2]) for name, paths in RESULT_NAMES.items()}
-        valid = [value for value in results.values() if isinstance(value.get("json"), dict)]
+        for name in ("pre_market", "intraday_10am", "market_close"):
+            if not isinstance(results[name].get("json"), dict):
+                recent = self._readonly.latest_briefing(name, target)
+                if isinstance(recent.get("json"), dict):
+                    results[name].update(recent)
+        valid = [
+            results[name] for name in ("pre_market", "intraday_10am", "market_close")
+            if isinstance(results[name].get("json"), dict)
+        ]
         latest = max(valid, key=lambda value: self._completed_key(value["json"]), default=None)
         runtime = self._load_runtime()
         return {
@@ -39,6 +51,7 @@ class DashboardViewModel:
             "watchlist": self.watchlist(latest.get("json") if latest else {}),
             "messages": self.messages(results),
             "runtime": runtime,
+            "recommendations": self._readonly.latest_recommendation(),
         }
 
     def _load_runtime(self) -> dict[str, object]:
@@ -58,8 +71,8 @@ class DashboardViewModel:
             payload = loaded
         except FileNotFoundError:
             pass
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            error = f"{json_name}: {type(exc).__name__}: {exc}"
+        except (OSError, ValueError, json.JSONDecodeError):
+            error = "저장된 브리핑 파일 일부를 읽을 수 없습니다."
         try: markdown = markdown_path.read_text(encoding="utf-8")
         except OSError: markdown = ""
         return {"json": payload, "markdown": markdown, "error": error, "next_time": next_time}

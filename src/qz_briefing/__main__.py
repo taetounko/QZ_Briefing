@@ -139,6 +139,7 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     commands.add_argument("--validate-live-recommendation-collection", action="store_true")
     commands.add_argument("--diagnose-opt10059-live", action="store_true")
     commands.add_argument("--validate-cached-opt10059-candidates", action="store_true")
+    commands.add_argument("--dashboard", action="store_true")
     parser.add_argument("--symbol")
     parser.add_argument("--mode", choices=("bootstrap","daily_incremental","repair"))
     parser.add_argument("--max-symbols", type=int)
@@ -455,6 +456,35 @@ def run(
     """Assemble the connection runtime and keep the Qt event loop running."""
     options = parse_cli_arguments(arguments)
     project_root = Path(__file__).resolve().parents[2]
+    if options.dashboard:
+        application = application_factory(sys.argv if arguments is None else arguments)
+        if hasattr(application, "setQuitOnLastWindowClosed"):
+            application.setQuitOnLastWindowClosed(True)
+        now = clock(); trading_day = market_day_checker(now.date())
+        if trading_day.status is MarketStatus.CLOSED:
+            market_label = "주말" if trading_day.reason == "weekend" else "확정 휴장일"
+        elif now.time() < time(9, 0):
+            market_label = "개장 전"
+        elif now.time() < time(15, 40):
+            market_label = "장중"
+        else:
+            market_label = "장 종료"
+        if dashboard_factory is None:
+            print("DASHBOARD STARTUP FAILED", flush=True); return 2
+        dashboard = dashboard_factory(
+            root=project_root / "data" / "briefings",
+            recommendation_root=project_root / "data" / "recommendations",
+            connection_state=lambda: "저장 파일 기반 · Kiwoom 미연결",
+            trading_day_status=market_label,
+            shutdown=application.quit,
+            open_folder=lambda: None,
+            clock=clock,
+            read_only=True,
+            standalone=True,
+        )
+        dashboard.show()
+        print("DASHBOARD_STARTED=1 MODE=READ_ONLY", flush=True)
+        return int(application.exec_())
     if options.validate_unattended_cycle:
         from qz_briefing.runtime.unattended_validation import print_unattended_validation, validate_unattended_cycle
         result = validate_unattended_cycle()

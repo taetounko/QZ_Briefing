@@ -97,7 +97,7 @@ def test_main_window_has_eight_tabs_refreshes_files_and_close_hides(app, tmp_pat
     write_result(tmp_path)
     shutdown = []
     window = DashboardMainWindow(tmp_path, connection_state=lambda: "CONNECTED", trading_day_status="open", shutdown=lambda: shutdown.append(True), open_folder=lambda: None, clock=lambda: datetime(2026, 7, 22, 16))
-    assert window.tab_count == 8
+    assert window.tab_count == 9
     assert all(window._status_labels[key] is not None for key in ("connection", "calendar", "clock", "next", "last", "shutdown"))
     assert window._holdings.rowCount() == 1 and window._leadership.rowCount() == 1 and window._watchlist.rowCount() == 1
     assert "총 투자금액 1,000,000" in window._holdings_summary.text()

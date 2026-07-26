@@ -32,13 +32,17 @@ class DashboardMainWindow(QMainWindow):
         self, root: Path, *, connection_state: Callable[[], object],
         trading_day_status: str, shutdown: Callable[[], None],
         open_folder: Callable[[], None] | None = None,
+        recommendation_root: Path | None = None,
+        read_only: bool = False,
+        standalone: bool = False,
         clock: Callable[[], datetime] = datetime.now,
     ) -> None:
         super().__init__()
         self._root, self._clock, self._connection_state = Path(root), clock, connection_state
         self._open_folder = open_folder or (lambda: os.startfile(str(self._root)))
         self._trading_day_status, self._background_notice_shown = trading_day_status, False
-        self._view_model = DashboardViewModel(root, clock=clock)
+        self._read_only, self._standalone, self._shutdown = read_only, standalone, shutdown
+        self._view_model = DashboardViewModel(root, recommendation_root=recommendation_root, clock=clock)
         self._runtime_messages: list[str] = []
         self._file_messages: list[str] = []
         self.setWindowTitle("QZ Briefing 대시보드"); self.resize(1400, 850)
@@ -48,11 +52,12 @@ class DashboardMainWindow(QMainWindow):
         self._holdings_summary = QLabel()
         self._holding_detail = QTextBrowser()
         self._leadership = self._table(LEADERSHIP_COLUMNS); self._watchlist = self._table(WATCH_COLUMNS)
-        self._messages = QTextBrowser()
+        self._messages = QTextBrowser(); self._recommendations = QTextBrowser()
         self._build_ui()
         self.tray = TrayController(self, show_window=self.show_dashboard, refresh=self.refresh, open_folder=self._open_folder, shutdown=shutdown)
         self.briefing_completed.connect(lambda _: self.refresh())
         self._timer = QTimer(self); self._timer.timeout.connect(self._update_status); self._timer.start(1000)
+        self._refresh_timer = QTimer(self); self._refresh_timer.timeout.connect(self.refresh); self._refresh_timer.start(30000)
         self.refresh()
 
     @staticmethod
@@ -65,6 +70,10 @@ class DashboardMainWindow(QMainWindow):
         central = QWidget(); layout = QVBoxLayout(central); status = QHBoxLayout()
         labels = (("connection", "키움"), ("calendar", "거래일"), ("clock", "현재"), ("next", "다음"), ("last", "마지막"), ("shutdown", "종료"))
         for key, title in labels: status.addWidget(QLabel(f"{title}:")); status.addWidget(self._status_labels[key])
+        if self._read_only:
+            badge = QLabel("READ_ONLY · 저장 결과 조회 전용")
+            badge.setStyleSheet("font-weight: bold; color: #9a6700; padding: 6px;")
+            layout.addWidget(badge)
         layout.addLayout(status)
         self._tabs.addTab(self._summary, "오늘 요약")
         for key, title in (("pre_market", "장전 브리핑"), ("intraday_10am", "오전 10시 브리핑"), ("market_close", "장마감 브리핑")):
@@ -73,6 +82,7 @@ class DashboardMainWindow(QMainWindow):
         holdings_layout.addWidget(self._holdings_summary); holdings_layout.addWidget(self._holdings)
         holdings_layout.addWidget(self._holding_detail)
         self._holdings.itemSelectionChanged.connect(self._show_holding_detail)
+        self._tabs.addTab(self._recommendations, "일일 추천")
         self._tabs.addTab(holdings_tab, "보유종목"); self._tabs.addTab(self._leadership, "주도주·반등 후보")
         self._tabs.addTab(self._watchlist, "다음 거래일 관찰목록"); self._tabs.addTab(self._messages, "오류·경고")
         layout.addWidget(self._tabs)
@@ -100,7 +110,7 @@ class DashboardMainWindow(QMainWindow):
                 "telegram_pending_count", "telegram_last_error", "telegram_next_attempt_at",
             )
         ]
-        self._summary.setPlainText("\n".join(f"{key}: {value}" for key, value in summary.items()) + "\n" + "\n".join(runtime_lines))
+        self._summary.setPlainText(self._safe_text("\n".join(f"{key}: {value}" for key, value in summary.items()) + "\n" + "\n".join(runtime_lines)))
         for key, view in self._result_views.items():
             wrapper = model["results"][key]; payload = wrapper.get("json")
             if not isinstance(payload, dict):
@@ -109,15 +119,52 @@ class DashboardMainWindow(QMainWindow):
                 text = f"생성시각: {payload.get('completed_at') or payload.get('metadata', {}).get('generated_at', '-')}\n\n"
                 text += json.dumps({"analysis": payload.get("analysis"), "market_close_analysis": payload.get("market_close_analysis"), "warnings": payload.get("warnings", []), "errors": payload.get("errors", [])}, ensure_ascii=False, indent=2)
                 text += "\n\n" + str(wrapper.get("markdown") or "")
-                if key == "market_close":
+                if key == "market_close" and not self._read_only:
                     validation = model["results"]["market_close_validation"]
                     if isinstance(validation.get("json"), dict): text += "\n\n[수동 validation 결과 별도 존재]\n" + str(validation.get("markdown") or "")
-                view.setPlainText(text)
+                view.setPlainText(self._safe_text(text))
         self._populate_holdings(model["holdings"]); self._populate_leadership(model["leadership"]); self._populate_watchlist(model["watchlist"])
         self._file_messages = list(model["messages"])
-        self._messages.setPlainText("\n".join(self._file_messages + self._runtime_messages) or "오류·경고 없음")
+        self._messages.setPlainText(self._safe_text("\n".join(self._file_messages + self._runtime_messages) or "오류·경고 없음"))
+        self._render_recommendations(model.get("recommendations", {}))
         latest = model.get("latest", {}); self._status_labels["last"].setText(str(latest.get("briefing_type", "없음")) if isinstance(latest, dict) else "없음")
         self._update_status()
+
+    def _render_recommendations(self, wrapper: dict[str, object]) -> None:
+        report = wrapper.get("report") if isinstance(wrapper, dict) else None
+        if not isinstance(report, dict):
+            self._recommendations.setPlainText("저장된 최근 브리핑 또는 추천 결과가 없습니다.")
+            return
+        rows = []
+        for group in ("strong", "review"):
+            for item in report.get(group, [])[:3]:
+                if isinstance(item, dict): rows.append(item)
+        if not rows:
+            self._recommendations.setPlainText("현재 기준을 충족한 추천 후보가 없습니다.")
+            return
+        lines = [
+            f"추천 보고서 생성 시각: {report.get('generated_at') or '-'}",
+            f"데이터 기준 시각: {report.get('data_as_of') or '-'}",
+            f"완전 강추 {report.get('strong_count', 0)} / 추가 검토 {report.get('review_count', 0)}", "",
+        ]
+        if wrapper.get("recent_failure_at"):
+            lines.insert(3, f"최근 추천 생성 실패 기록: {wrapper['recent_failure_at']} (상세 내용은 표시하지 않음)")
+        for item in rows:
+            lines.extend([
+                f"[{item.get('grade') or '-'}] {item.get('name') or '-'} ({item.get('code') or '-'}) · {item.get('market') or '-'}",
+                f"종합점수 {item.get('total_score', '-')} / 신뢰도 {item.get('confidence', '-')}",
+                f"완성 주봉 {item.get('weekly_close', '-')} / MA5 {item.get('weekly_ma5', '-')} / 이격률 {item.get('weekly_distance_rate', '-')}",
+                "근거: " + "; ".join(str(x) for x in item.get("reasons", [])[:4]),
+                "부족 자료: " + ("; ".join(str(x) for x in item.get("missing", [])) or "없음"),
+                "주요 위험: " + ("; ".join(str(x) for x in item.get("risks", [])) or "없음"),
+                f"추격매수 금지: {'예' if item.get('chase_buying_prohibited') else '아니오'}",
+                "무효화 조건: " + ("; ".join(str(x) for x in item.get("invalidation_conditions", [])) or "자료 없음"), "",
+            ])
+        self._recommendations.setPlainText(self._safe_text("\n".join(lines)))
+
+    def _safe_text(self, text: str) -> str:
+        project_root = str(self._root.parent.parent)
+        return text.replace(project_root, "[내부 경로 숨김]").replace("None", "-").replace("null", "자료 부족").replace("unknown", "자료 부족")
 
     def _populate_holdings(self, data: dict[str, object]) -> None:
         rows = data.get("rows", []); self._holdings.setRowCount(len(rows))
@@ -176,9 +223,11 @@ class DashboardMainWindow(QMainWindow):
         self._update_status(); self._messages.setPlainText("\n".join(self._file_messages + self._runtime_messages))
 
     def closeEvent(self, event) -> None:
+        if self._standalone:
+            event.accept(); self.stop(); self._shutdown(); return
         event.ignore(); self.hide()
         if not self._background_notice_shown:
             self._background_notice_shown = True; self.tray.notify_background()
 
     def stop(self) -> None:
-        self._timer.stop(); self.tray.stop()
+        self._timer.stop(); self._refresh_timer.stop(); self.tray.stop()
