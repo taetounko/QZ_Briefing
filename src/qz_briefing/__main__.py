@@ -134,6 +134,8 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     commands.add_argument("--validate-recommendation-data-pipeline", action="store_true")
     commands.add_argument("--plan-live-recommendation-collection", action="store_true")
     commands.add_argument("--collect-recommendation-data", action="store_true")
+    commands.add_argument("--collect-recommendation-universe", action="store_true")
+    commands.add_argument("--validate-full-universe-collection", action="store_true")
     commands.add_argument("--diagnose-opt10081-live", action="store_true")
     commands.add_argument("--diagnose-kiwoom-login", action="store_true")
     commands.add_argument("--validate-live-recommendation-collection", action="store_true")
@@ -147,6 +149,10 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     parser.add_argument("--price-only", action="store_true")
     parser.add_argument("--cached-only", action="store_true")
     parser.add_argument("--allow-kiwoom-live", action="store_true")
+    parser.add_argument("--resume", metavar="SESSION_ID")
+    parser.add_argument("--restart", action="store_true")
+    parser.add_argument("--validation-root", type=Path)
+    parser.add_argument("--full-universe-confirmed", action="store_true")
     parser.add_argument("--force-kiwoom-refresh", action="store_true")
     parser.add_argument("--remove-secret", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(raw)
@@ -552,6 +558,23 @@ def run(
             return run_collection_dry_run(options.mode,max_symbols=options.max_symbols,dry_run=options.dry_run)
         except ValueError as exc:
             print(f"COLLECTION BLOCKED: {exc}")
+            return 2
+    if options.validate_full_universe_collection:
+        from qz_briefing.recommendations.full_universe_collection import print_full_universe_validation, validate_full_universe_collection
+        result = validate_full_universe_collection(project_root)
+        print_full_universe_validation(result)
+        return 0 if result["success"] else 1
+    if options.collect_recommendation_universe:
+        from qz_briefing.recommendations.full_universe_collection import run_full_collection_plan
+        try:
+            return run_full_collection_plan(
+                project_root, dry_run=options.dry_run, cached_only=options.cached_only,
+                allow_live=options.allow_kiwoom_live, max_symbols=options.max_symbols,
+                full_universe_confirmed=options.full_universe_confirmed,
+                validation_root=options.validation_root, resume=options.resume, restart=options.restart,
+            )
+        except ValueError as exc:
+            print(f"FULL COLLECTION BLOCKED: {exc}")
             return 2
     if options.diagnose_opt10081_live:
         from qz_briefing.recommendations.opt10081_diagnostic import print_diagnostic, run_opt10081_diagnostic
