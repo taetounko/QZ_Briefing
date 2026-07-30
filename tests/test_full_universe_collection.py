@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime, timedelta
 import json
+import signal
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,9 @@ from qz_briefing.__main__ import run
 from qz_briefing.recommendations.data_models import DataMetadata, StockMasterRecord
 from qz_briefing.recommendations.full_universe_collection import (
     FullCollectionSession, deterministic_universe, protected_validation_root,
-    select_flow_targets, should_abort_for_failures, validate_scope,
+    run_full_collection_live, run_full_collection_plan,
+    select_balanced_universe, select_flow_targets, should_abort_for_failures,
+    validate_live_scope, validate_scope,
 )
 from qz_briefing.recommendations.request_planner import PreliminaryCandidate
 
@@ -101,4 +104,202 @@ def test_collection_cli_blocks_unsafe_modes(tmp_path: Path, capsys, monkeypatch)
     assert run(common + ["--dry-run"]) == 2
     assert "full collection requires --full-universe-confirmed" in capsys.readouterr().out
     assert run(common + ["--allow-kiwoom-live", "--max-symbols", "20"]) == 2
-    assert "live collection is intentionally unavailable" in capsys.readouterr().out
+    assert "blocked inside Codex" in capsys.readouterr().out
+
+
+def test_live_scope_is_explicit_and_never_exceeds_twenty():
+    assert validate_live_scope(20) == 20
+    with pytest.raises(ValueError): validate_live_scope(None)
+    with pytest.raises(ValueError): validate_live_scope(21)
+
+
+def test_live_selection_balances_ten_per_market_and_backfills_short_market():
+    records = [master(f"1{index:05d}", "KOSPI") for index in range(12)] + [master(f"2{index:05d}", "KOSDAQ") for index in range(12)]
+    selected = select_balanced_universe(reversed(records), 20)
+    assert sum(row.metadata.market == "KOSPI" for row in selected) == 10
+    assert sum(row.metadata.market == "KOSDAQ" for row in selected) == 10
+    short = select_balanced_universe(records[:3] + records[12:], 20)
+    assert len(short) == 15 and sum(row.metadata.market == "KOSPI" for row in short) == 3
+
+
+def test_validation_reports_mock_live_adapter_contract(capsys):
+    assert run(["--validate-full-universe-collection"]) == 0
+    output = capsys.readouterr().out
+    assert "FULL UNIVERSE LIVE ADAPTER VALIDATION: PASS" in output
+
+
+class LiveAdapter:
+    def __init__(self): self.closed = False
+    def get_connect_state(self): return 1
+    def get_code_list_by_market(self, market):
+        prefix = "1" if market == "0" else "2"
+        return [f"{prefix}{index:05d}" for index in range(12)]
+    def get_master_code_name(self, code): return f"가상-{code}"
+    def get_master_stock_state(self, code): return "정상"
+    def get_master_construction(self, code): return "정상"
+    def get_master_listed_stock_date(self, code): return "20200101"
+    def get_master_last_price(self, code): return "1000"
+    def get_master_stock_info(self, code): return "보통주"
+    def close(self): self.closed = True
+
+
+class LiveSignal:
+    def __init__(self): self.callbacks=[]
+    def connect(self, callback): self.callbacks.append(callback)
+    def emit(self):
+        for callback in list(self.callbacks): callback()
+
+
+class LiveApplication:
+    def __init__(self):
+        self.quit_on_close = True
+        self.lastWindowClosed=LiveSignal(); self.aboutToQuit=LiveSignal()
+    def setQuitOnLastWindowClosed(self, value): self.quit_on_close = value
+
+
+class LiveManager:
+    def __init__(self, adapter): self.adapter=adapter; self.stopped=False
+    def stop(self): self.stopped=True
+
+
+class LiveQueue:
+    def __init__(self, adapter): self.requests = []; self.closed = False
+    def request_rows(self, request):
+        self.requests.append((request.tr_code.upper(), request.inputs["종목코드"]))
+        if request.tr_code.upper() == "OPT10059":
+            return [{"일자":"20260724","외국인투자자":"100","기관계":"200"}]
+        days=[]; current=date(2026,7,24)
+        while len(days)<130:
+            if current.weekday()<5: days.append(current)
+            current-=timedelta(days=1)
+        rows=[]
+        for index, day in enumerate(reversed(days), 1):
+            close=100+index
+            rows.append({"일자":day.strftime("%Y%m%d"),"시가":str(close-1),"고가":str(close+1),"저가":str(close-2),"현재가":str(close),"거래량":"1000","거래대금":"100000"})
+        return rows
+    def close(self): self.closed = True
+
+
+def test_mock_live_adapter_collects_balanced_twenty_and_saves_report(tmp_path, capsys):
+    adapter=LiveAdapter(); queues=[]
+    def make_queue(value):
+        queue=LiveQueue(value); queues.append(queue); return queue
+    result=run_full_collection_live(tmp_path,max_symbols=20,clock=lambda:datetime(2026,7,24,16),application_factory=lambda _:LiveApplication(),adapter_factory=lambda:adapter,manager_factory=LiveManager,queue_factory=make_queue,connected=lambda _:True)
+    assert result == 0 and adapter.closed and queues[0].closed
+    output=capsys.readouterr().out
+    assert "KOSPI_SELECTED=10" in output and "KOSDAQ_SELECTED=10" in output
+    assert "ORDER_ACCOUNT_TR=0" in output and "TELEGRAM_SENDS=0" in output and "DASHBOARD_STARTED=0" in output
+    sessions=list((tmp_path/"data/validation/recommendations/full_collection").iterdir())
+    assert len(sessions)==1 and (sessions[0]/"reports/recommendations.json").is_file()
+    assert len([call for call in queues[0].requests if call[0]=="OPT10081"])==20
+    assert "QAPPLICATION_READY=1" in output and "DASHBOARD_STARTED=0" in output
+
+
+def test_live_creation_order_application_adapter_connection_login_collection(tmp_path):
+    events=[]; adapter=LiveAdapter()
+    class OrderedApplication(LiveApplication):
+        def setQuitOnLastWindowClosed(self, value):
+            events.append("application.disable_quit_on_last_window_closed")
+            super().setQuitOnLastWindowClosed(value)
+    app=OrderedApplication()
+    class OrderedQueue(LiveQueue):
+        def request_rows(self, request):
+            if "collection" not in events: events.append("collection")
+            return super().request_rows(request)
+    def create_app(_): events.append("application.create"); return app
+    def create_adapter():
+        assert events == ["application.create","application.disable_quit_on_last_window_closed"]
+        events.append("adapter.create"); return adapter
+    def create_manager(value): events.append("connection.create"); return LiveManager(value)
+    def login(value): events.append("login"); return True
+    assert run_full_collection_live(tmp_path,max_symbols=1,clock=lambda:datetime(2026,7,24,16),application_factory=create_app,adapter_factory=create_adapter,manager_factory=create_manager,queue_factory=OrderedQueue,connected=login)==0
+    assert events[:6]==["application.create","application.disable_quit_on_last_window_closed","adapter.create","connection.create","login","collection"]
+    assert app.quit_on_close is False
+
+
+def test_application_factory_reuses_existing_instance_without_duplicate(tmp_path):
+    existing=LiveApplication(); creations=[]
+    def official_style_factory(_):
+        if not creations: creations.append(existing)
+        return creations[0]
+    assert run_full_collection_live(tmp_path,max_symbols=1,clock=lambda:datetime(2026,7,24,16),application_factory=official_style_factory,adapter_factory=LiveAdapter,manager_factory=LiveManager,queue_factory=LiveQueue,connected=lambda _:True)==0
+    assert creations == [existing]
+
+
+def test_dry_run_and_offline_validation_never_create_qapplication_or_adapter(tmp_path):
+    def forbidden(*args,**kwargs): raise AssertionError("Qt runtime constructed")
+    root=tmp_path/"data/validation/recommendations/full_collection"
+    assert run_full_collection_plan(tmp_path,dry_run=True,cached_only=False,allow_live=False,max_symbols=20,full_universe_confirmed=False,validation_root=root,application_factory=forbidden,adapter_factory=forbidden)==0
+    assert run(["--validate-full-universe-collection"],application_factory=forbidden,adapter_factory=forbidden,dashboard_factory=forbidden)==0
+
+
+def test_application_or_adapter_initialization_failure_makes_no_tr_calls(tmp_path):
+    calls=[]
+    with pytest.raises(RuntimeError,match="QApplication initialization failed"):
+        run_full_collection_live(tmp_path,max_symbols=1,application_factory=lambda _:(_ for _ in ()).throw(RuntimeError("fixture")),adapter_factory=lambda:calls.append("adapter"))
+    assert calls == []
+    with pytest.raises(RuntimeError,match="Kiwoom adapter initialization failed"):
+        run_full_collection_live(tmp_path,max_symbols=1,application_factory=lambda _:LiveApplication(),adapter_factory=lambda:(_ for _ in ()).throw(RuntimeError("fixture")),queue_factory=lambda _:calls.append("CommRqData"))
+    assert calls == []
+
+
+def test_login_failure_saves_safe_checkpoint_without_collection(tmp_path):
+    queues=[]
+    with pytest.raises(ValueError,match="GetConnectState"):
+        run_full_collection_live(tmp_path,max_symbols=1,clock=lambda:datetime(2026,7,24,16),application_factory=lambda _:LiveApplication(),adapter_factory=LiveAdapter,manager_factory=LiveManager,queue_factory=lambda value:queues.append(value),connected=lambda _:False)
+    assert queues == []
+    sessions=list((tmp_path/"data/validation/recommendations/full_collection").iterdir())
+    progress=json.loads((sessions[0]/"progress.json").read_text(encoding="utf-8"))
+    assert progress["phase"]=="startup_failed"
+    assert progress["shutdown_reason"]=="login_failed"
+
+
+def test_last_window_closed_and_about_to_quit_do_not_stop_collection(tmp_path, capsys):
+    app=LiveApplication(); queue=[]
+    def login(_):
+        app.lastWindowClosed.emit(); app.aboutToQuit.emit()
+        return True
+    assert run_full_collection_live(tmp_path,max_symbols=1,clock=lambda:datetime(2026,7,24,16),application_factory=lambda _:app,adapter_factory=LiveAdapter,manager_factory=LiveManager,queue_factory=lambda value:(queue.append(LiveQueue(value)) or queue[0]),connected=login)==0
+    output=capsys.readouterr().out
+    assert "QT_LAST_WINDOW_CLOSED_IGNORED=1" in output
+    assert "QT_ABOUT_TO_QUIT_IGNORED=1" in output
+    assert "SHUTDOWN_REASON=completed" in output
+    assert "shutdown requested by user" not in output
+    assert queue[0].requests
+
+
+def test_non_sigint_keyboard_interrupt_after_login_window_close_is_ignored(tmp_path, capsys):
+    adapter=LiveAdapter()
+    def login(_): raise KeyboardInterrupt
+    assert run_full_collection_live(tmp_path,max_symbols=1,clock=lambda:datetime(2026,7,24,16),application_factory=lambda _:LiveApplication(),adapter_factory=lambda:adapter,manager_factory=LiveManager,queue_factory=LiveQueue,connected=login)==0
+    output=capsys.readouterr().out
+    assert "QT_LAST_WINDOW_CLOSED_IGNORED=1" in output and "SHUTDOWN_REASON=completed" in output
+
+
+def test_real_sigint_records_user_interrupt_and_atomic_checkpoint(tmp_path, capsys):
+    class InterruptQueue(LiveQueue):
+        def request_rows(self, request):
+            signal.raise_signal(signal.SIGINT)
+            raise AssertionError("SIGINT handler did not interrupt")
+    result=run_full_collection_live(tmp_path,max_symbols=1,clock=lambda:datetime(2026,7,24,16),application_factory=lambda _:LiveApplication(),adapter_factory=LiveAdapter,manager_factory=LiveManager,queue_factory=InterruptQueue,connected=lambda _:True)
+    assert result==130
+    output=capsys.readouterr().out
+    assert "SHUTDOWN_REASON=user_interrupt" in output and "RESUME_AVAILABLE=1" in output
+    sessions=list((tmp_path/"data/validation/recommendations/full_collection").iterdir())
+    progress=json.loads((sessions[0]/"progress.json").read_text(encoding="utf-8"))
+    assert progress["phase"]=="interrupted" and progress["shutdown_reason"]=="user_interrupt"
+    assert not list(sessions[0].rglob("*.tmp"))
+
+
+def test_connection_loss_has_distinct_reason_and_checkpoint(tmp_path, capsys):
+    adapter=LiveAdapter(); adapter.connected=True
+    adapter.get_connect_state=lambda: 1 if adapter.connected else 0
+    class DisconnectQueue(LiveQueue):
+        def request_rows(self, request):
+            adapter.connected=False
+            raise RuntimeError("fixture disconnected")
+    assert run_full_collection_live(tmp_path,max_symbols=1,clock=lambda:datetime(2026,7,24,16),application_factory=lambda _:LiveApplication(),adapter_factory=lambda:adapter,manager_factory=LiveManager,queue_factory=DisconnectQueue,connected=lambda _:True)==1
+    assert "SHUTDOWN_REASON=connection_lost" in capsys.readouterr().out
+    session=next((tmp_path/"data/validation/recommendations/full_collection").iterdir())
+    progress=json.loads((session/"progress.json").read_text(encoding="utf-8"))
+    assert progress["shutdown_reason"]=="connection_lost"

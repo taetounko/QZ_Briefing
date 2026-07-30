@@ -149,13 +149,20 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     parser.add_argument("--price-only", action="store_true")
     parser.add_argument("--cached-only", action="store_true")
     parser.add_argument("--allow-kiwoom-live", action="store_true")
-    parser.add_argument("--resume", metavar="SESSION_ID")
+    parser.add_argument("--resume", nargs="?", const="", metavar="SESSION_ID")
+    parser.add_argument("--session-id")
     parser.add_argument("--restart", action="store_true")
     parser.add_argument("--validation-root", type=Path)
     parser.add_argument("--full-universe-confirmed", action="store_true")
     parser.add_argument("--force-kiwoom-refresh", action="store_true")
     parser.add_argument("--remove-secret", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(raw)
+    if parsed.session_id and parsed.resume is None:
+        parser.error("--session-id requires --resume")
+    if parsed.session_id and parsed.resume not in (None, ""):
+        parser.error("provide the resume session either after --resume or with --session-id, not both")
+    if parsed.session_id:
+        parsed.resume = parsed.session_id
     if parsed.remove_secret and not parsed.disable_telegram:
         parser.error("--remove-secret requires --disable-telegram")
     if parsed.diagnose_opt10081_live and not parsed.symbol:
@@ -572,8 +579,10 @@ def run(
                 allow_live=options.allow_kiwoom_live, max_symbols=options.max_symbols,
                 full_universe_confirmed=options.full_universe_confirmed,
                 validation_root=options.validation_root, resume=options.resume, restart=options.restart,
+                application_factory=application_factory, adapter_factory=adapter_factory,
+                manager_factory=manager_factory, queue_factory=tr_queue_factory,
             )
-        except ValueError as exc:
+        except (RuntimeError, ValueError) as exc:
             print(f"FULL COLLECTION BLOCKED: {exc}")
             return 2
     if options.diagnose_opt10081_live:
