@@ -7,13 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from qz_briefing.__main__ import run
+from qz_briefing.__main__ import parse_cli_arguments, run
 from qz_briefing.recommendations.data_models import DataMetadata, StockMasterRecord
 from qz_briefing.recommendations.full_universe_collection import (
-    FullCollectionSession, deterministic_universe, protected_validation_root,
+    CollectionProgress, FullCollectionSession, deterministic_universe, protected_validation_root,
+    remaining_counts,
     run_full_collection_live, run_full_collection_plan,
     select_balanced_universe, select_flow_targets, should_abort_for_failures,
-    validate_live_scope, validate_scope,
+    validate_cross_session_cache, validate_full_collection_session, validate_live_scope, validate_scope,
 )
 from qz_briefing.recommendations.request_planner import PreliminaryCandidate
 
@@ -303,3 +304,156 @@ def test_connection_loss_has_distinct_reason_and_checkpoint(tmp_path, capsys):
     session=next((tmp_path/"data/validation/recommendations/full_collection").iterdir())
     progress=json.loads((session/"progress.json").read_text(encoding="utf-8"))
     assert progress["shutdown_reason"]=="connection_lost"
+
+
+def test_live_stage_confirmation_rules_and_cli_option():
+    assert validate_live_scope(20, False)==20
+    with pytest.raises(ValueError,match="confirm_100_symbol_live_required"): validate_live_scope(21, False)
+    assert validate_live_scope(21, True)==21
+    assert validate_live_scope(100, True)==100
+    with pytest.raises(ValueError,match="max_symbols_exceeds_current_live_stage"): validate_live_scope(101, True)
+    parsed=parse_cli_arguments(["--collect-recommendation-universe","--allow-kiwoom-live","--max-symbols","100","--confirm-100-symbol-live"])
+    assert parsed.confirm_100_symbol_live
+
+
+def test_live_stage_blocks_before_qt_or_tr_even_with_full_confirmation(tmp_path):
+    calls=[]
+    def forbidden(*args,**kwargs): calls.append("external"); raise AssertionError("external")
+    with pytest.raises(ValueError,match="confirm_100_symbol_live_required"):
+        run_full_collection_plan(tmp_path,dry_run=False,cached_only=False,allow_live=True,max_symbols=100,full_universe_confirmed=False,application_factory=forbidden,adapter_factory=forbidden)
+    with pytest.raises(ValueError,match="max_symbols_exceeds_current_live_stage"):
+        run_full_collection_plan(tmp_path,dry_run=False,cached_only=False,allow_live=True,max_symbols=101,full_universe_confirmed=True,confirm_100_symbol_live=True,application_factory=forbidden,adapter_factory=forbidden)
+    assert calls==[]
+
+
+def test_balanced_selection_scales_to_one_hundred_and_odd_limits():
+    records=[master(f"1{index:05d}","KOSPI") for index in range(60)]+[master(f"2{index:05d}","KOSDAQ") for index in range(60)]
+    hundred=select_balanced_universe(reversed(records),100)
+    assert sum(row.metadata.market=="KOSPI" for row in hundred)==50
+    assert sum(row.metadata.market=="KOSDAQ" for row in hundred)==50
+    odd=select_balanced_universe(records,99)
+    assert sum(row.metadata.market=="KOSPI" for row in odd)==50
+    assert sum(row.metadata.market=="KOSDAQ" for row in odd)==49
+    assert [row.metadata.code for row in hundred]==[row.metadata.code for row in select_balanced_universe(reversed(records),100)]
+
+
+class HundredAdapter(LiveAdapter):
+    def get_code_list_by_market(self, market):
+        prefix="1" if market=="0" else "2"
+        return [f"{prefix}{index:05d}" for index in range(60)]
+
+
+def test_mock_hundred_collects_50_50_and_resume_makes_no_duplicate_requests(tmp_path, capsys):
+    clock=lambda:datetime(2026,7,24,16)
+    queues=[]
+    def make_queue(adapter):
+        queue=LiveQueue(adapter); queues.append(queue); return queue
+    assert run_full_collection_live(tmp_path,max_symbols=100,confirm_100_symbol_live=True,clock=clock,application_factory=lambda _:LiveApplication(),adapter_factory=HundredAdapter,manager_factory=LiveManager,queue_factory=make_queue,connected=lambda _:True)==0
+    first_output=capsys.readouterr().out
+    first=queues[0]
+    assert len([item for item in first.requests if item[0]=="OPT10081"])==100
+    assert len([item for item in first.requests if item[0]=="OPT10059"])<=100
+    assert "KOSPI_SELECTED=50" in first_output and "KOSDAQ_SELECTED=50" in first_output
+    assert "CONFIRM_100_SYMBOL_LIVE=1" in first_output and "SELECTED_SYMBOLS=100" in first_output
+    root=tmp_path/"data/validation/recommendations/full_collection"
+    session=next(root.iterdir())
+    plan=json.loads((session/"plan.json").read_text(encoding="utf-8"))
+    assert plan["symbol_limit"]==100 and plan["confirm_100_symbol_live"] is True
+    assert plan["market_counts"]=={"KOSPI":50,"KOSDAQ":50}
+    assert len(plan["selected_symbols"])==100 and plan["schema_version"]==2
+    assert run_full_collection_live(tmp_path,max_symbols=100,confirm_100_symbol_live=True,resume=session.name,clock=clock,application_factory=lambda _:LiveApplication(),adapter_factory=HundredAdapter,manager_factory=LiveManager,queue_factory=make_queue,connected=lambda _:True)==0
+    assert queues[1].requests==[]
+    resumed=capsys.readouterr().out
+    assert "RESTORED_PRICE_SYMBOLS=100" in resumed
+    assert "LIVE_PRICE_SYMBOLS=0" in resumed and "OPT10081_REQUESTS=0" in resumed
+    assert not (tmp_path/"data/recommendations").exists()
+
+
+def test_corrupt_completed_price_cache_is_not_restored(tmp_path, capsys):
+    clock=lambda:datetime(2026,7,24,16); queues=[]
+    def make_queue(adapter):
+        queue=LiveQueue(adapter); queues.append(queue); return queue
+    assert run_full_collection_live(tmp_path,max_symbols=1,clock=clock,application_factory=lambda _:LiveApplication(),adapter_factory=LiveAdapter,manager_factory=LiveManager,queue_factory=make_queue,connected=lambda _:True)==0
+    capsys.readouterr(); session=next((tmp_path/"data/validation/recommendations/full_collection").iterdir())
+    code=json.loads((session/"universe.json").read_text(encoding="utf-8"))["symbols"][0]["code"]
+    (session/"price_normalized"/f"{code}.json").write_text("{broken",encoding="utf-8")
+    assert run_full_collection_live(tmp_path,max_symbols=1,resume=session.name,clock=clock,application_factory=lambda _:LiveApplication(),adapter_factory=LiveAdapter,manager_factory=LiveManager,queue_factory=make_queue,connected=lambda _:True)==0
+    assert [item[0] for item in queues[1].requests].count("OPT10081")==1
+
+
+def test_hundred_symbol_partial_interrupt_resumes_without_duplicate_prices(tmp_path, capsys):
+    clock=lambda:datetime(2026,7,24,16); queues=[]
+    class PartialQueue(LiveQueue):
+        def request_rows(self, request):
+            daily_count=sum(item[0]=="OPT10081" for item in self.requests)
+            if request.tr_code.upper()=="OPT10081" and daily_count==10:
+                signal.raise_signal(signal.SIGINT)
+            return super().request_rows(request)
+    def first_queue(adapter):
+        queue=PartialQueue(adapter); queues.append(queue); return queue
+    assert run_full_collection_live(tmp_path,max_symbols=100,confirm_100_symbol_live=True,clock=clock,application_factory=lambda _:LiveApplication(),adapter_factory=HundredAdapter,manager_factory=LiveManager,queue_factory=first_queue,connected=lambda _:True)==130
+    capsys.readouterr(); session=next((tmp_path/"data/validation/recommendations/full_collection").iterdir())
+    def resumed_queue(adapter):
+        queue=LiveQueue(adapter); queues.append(queue); return queue
+    assert run_full_collection_live(tmp_path,max_symbols=100,confirm_100_symbol_live=True,resume=session.name,clock=clock,application_factory=lambda _:LiveApplication(),adapter_factory=HundredAdapter,manager_factory=LiveManager,queue_factory=resumed_queue,connected=lambda _:True)==0
+    output=capsys.readouterr().out
+    assert len([item for item in queues[1].requests if item[0]=="OPT10081"])==90
+    assert "RESTORED_PRICE_SYMBOLS=10" in output and "LIVE_PRICE_SYMBOLS=90" in output
+
+
+@pytest.mark.parametrize(("completed","expected"),[(5,45),(45,5),(50,0),(55,0)])
+def test_remaining_counts_use_current_flow_phase(completed,expected):
+    progress=CollectionProgress(100,100,phase="flow",price_completed_codes=[str(i) for i in range(100)],flow_target_codes=[str(i) for i in range(50)],flow_completed_codes=[str(i) for i in range(completed)])
+    price,flow,estimated=remaining_counts(progress)
+    assert price==0 and flow==expected and estimated==expected
+    progress.phase="completed"
+    assert remaining_counts(progress)[2]==0
+
+
+def test_new_session_restores_compatible_symbols_from_smaller_completed_session(tmp_path, capsys):
+    queues=[]
+    def make_queue(adapter):
+        queue=LiveQueue(adapter); queues.append(queue); return queue
+    common=dict(application_factory=lambda _:LiveApplication(),adapter_factory=LiveAdapter,manager_factory=LiveManager,queue_factory=make_queue,connected=lambda _:True)
+    assert run_full_collection_live(tmp_path,max_symbols=2,clock=lambda:datetime(2026,7,24,16,0,0),**common)==0
+    capsys.readouterr()
+    assert run_full_collection_live(tmp_path,max_symbols=4,clock=lambda:datetime(2026,7,24,16,0,1),**common)==0
+    output=capsys.readouterr().out
+    assert len([item for item in queues[1].requests if item[0]=="OPT10081"])==2
+    assert "RESTORED_PRICE_SYMBOLS=2" in output and "LIVE_PRICE_SYMBOLS=2" in output
+    assert "PRICE_CACHE_HITS" not in output  # runtime uses restored/live counters; audit CLI provides cache aliases
+
+
+def test_mock_hundred_session_artifact_validator_is_read_only_and_consistent(tmp_path, capsys):
+    clock=lambda:datetime(2026,7,24,16)
+    assert run_full_collection_live(tmp_path,max_symbols=100,confirm_100_symbol_live=True,clock=clock,application_factory=lambda _:LiveApplication(),adapter_factory=HundredAdapter,manager_factory=LiveManager,queue_factory=LiveQueue,connected=lambda _:True)==0
+    capsys.readouterr(); root=tmp_path/"data/validation/recommendations/full_collection"; session=next(root.iterdir())
+    before={path.relative_to(session).as_posix():path.stat().st_mtime_ns for path in session.rglob("*") if path.is_file()}
+    result=validate_full_collection_session(tmp_path,session.name)
+    after={path.relative_to(session).as_posix():path.stat().st_mtime_ns for path in session.rglob("*") if path.is_file()}
+    assert result["success"] and result["price_files"]==100 and result["flow_files"]<=100 and result["report_files"]==1
+    assert before==after and result["external_calls"]==0
+    cache_result=validate_cross_session_cache(tmp_path,session.name,clock=lambda:datetime(2026,7,24,17))
+    assert cache_result["success"] and cache_result["restored_price"]==100
+    assert cache_result["restored_flow"]==result["hard_filter_eligible_symbols"]
+    assert cache_result["live_tr_calls"]==0 and cache_result["source_unchanged"]
+
+
+def test_scoring_and_selector_receive_only_weekly_hard_filter_passes(tmp_path, capsys, monkeypatch):
+    from qz_briefing.recommendations import full_universe_collection as module
+    original=module.select_integrated_recommendations; received=[]
+    monkeypatch.setattr(module,"select_integrated_recommendations",lambda bundles:(received.extend(item.master.metadata.code for item in bundles) or original(bundles)))
+    class MixedQueue(LiveQueue):
+        def request_rows(self, request):
+            rows=super().request_rows(request)
+            if request.tr_code.upper()=="OPT10081" and request.inputs["종목코드"].startswith("2"):
+                for index,row in enumerate(rows):
+                    close=400-index
+                    row.update({"시가":str(close+1),"고가":str(close+2),"저가":str(close-1),"현재가":str(close)})
+            return rows
+    assert run_full_collection_live(tmp_path,max_symbols=2,clock=lambda:datetime(2026,7,24,16),application_factory=lambda _:LiveApplication(),adapter_factory=LiveAdapter,manager_factory=LiveManager,queue_factory=MixedQueue,connected=lambda _:True)==0
+    capsys.readouterr(); session=next((tmp_path/"data/validation/recommendations/full_collection").iterdir())
+    progress=json.loads((session/"progress.json").read_text(encoding="utf-8")); report=json.loads((session/"reports/recommendations.json").read_text(encoding="utf-8"))
+    assert len(progress["hard_filter_pass_codes"])==1 and received==progress["hard_filter_pass_codes"]
+    assert report["universe_input_count"]==2 and report["scoring_input_count"]==report["selector_input_count"]==1
+    assert report["input_count"]==1

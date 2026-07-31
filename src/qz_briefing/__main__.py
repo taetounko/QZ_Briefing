@@ -136,6 +136,8 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     commands.add_argument("--collect-recommendation-data", action="store_true")
     commands.add_argument("--collect-recommendation-universe", action="store_true")
     commands.add_argument("--validate-full-universe-collection", action="store_true")
+    commands.add_argument("--validate-full-collection-session", action="store_true")
+    commands.add_argument("--validate-full-collection-cache", action="store_true")
     commands.add_argument("--diagnose-opt10081-live", action="store_true")
     commands.add_argument("--diagnose-kiwoom-login", action="store_true")
     commands.add_argument("--validate-live-recommendation-collection", action="store_true")
@@ -154,10 +156,11 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     parser.add_argument("--restart", action="store_true")
     parser.add_argument("--validation-root", type=Path)
     parser.add_argument("--full-universe-confirmed", action="store_true")
+    parser.add_argument("--confirm-100-symbol-live", action="store_true")
     parser.add_argument("--force-kiwoom-refresh", action="store_true")
     parser.add_argument("--remove-secret", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(raw)
-    if parsed.session_id and parsed.resume is None:
+    if parsed.session_id and parsed.resume is None and not (parsed.validate_full_collection_session or parsed.validate_full_collection_cache):
         parser.error("--session-id requires --resume")
     if parsed.session_id and parsed.resume not in (None, ""):
         parser.error("provide the resume session either after --resume or with --session-id, not both")
@@ -571,6 +574,25 @@ def run(
         result = validate_full_universe_collection(project_root)
         print_full_universe_validation(result)
         return 0 if result["success"] else 1
+    if options.validate_full_collection_session:
+        if not options.session_id:
+            print("SESSION ARTIFACT VALIDATION BLOCKED: --session-id is required"); return 2
+        from qz_briefing.recommendations.full_universe_collection import print_session_artifact_validation, validate_full_collection_session
+        try:
+            result = validate_full_collection_session(project_root, options.session_id)
+        except ValueError as exc:
+            print(f"SESSION ARTIFACT VALIDATION BLOCKED: {exc}"); return 2
+        print_session_artifact_validation(result)
+        return 0 if result["success"] else 1
+    if options.validate_full_collection_cache:
+        if not options.session_id:
+            print("CROSS SESSION CACHE VALIDATION BLOCKED: --session-id is required"); return 2
+        from qz_briefing.recommendations.full_universe_collection import print_cross_session_cache_validation, validate_cross_session_cache
+        try: result = validate_cross_session_cache(project_root, options.session_id)
+        except ValueError as exc:
+            print(f"CROSS SESSION CACHE VALIDATION BLOCKED: {exc}"); return 2
+        print_cross_session_cache_validation(result)
+        return 0 if result["success"] else 1
     if options.collect_recommendation_universe:
         from qz_briefing.recommendations.full_universe_collection import run_full_collection_plan
         try:
@@ -578,6 +600,7 @@ def run(
                 project_root, dry_run=options.dry_run, cached_only=options.cached_only,
                 allow_live=options.allow_kiwoom_live, max_symbols=options.max_symbols,
                 full_universe_confirmed=options.full_universe_confirmed,
+                confirm_100_symbol_live=options.confirm_100_symbol_live,
                 validation_root=options.validation_root, resume=options.resume, restart=options.restart,
                 application_factory=application_factory, adapter_factory=adapter_factory,
                 manager_factory=manager_factory, queue_factory=tr_queue_factory,
