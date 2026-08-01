@@ -21,8 +21,9 @@ RESULT_NAMES = {
 
 
 class DashboardViewModel:
-    def __init__(self, root: Path, *, recommendation_root: Path | None = None, clock=datetime.now) -> None:
+    def __init__(self, root: Path, *, recommendation_root: Path | None = None, recommendation_date: date | None = None, clock=datetime.now) -> None:
         self.root, self._clock = Path(root), clock
+        self._recommendation_date = recommendation_date
         self._readonly = ReadOnlyDashboardLoader(
             self.root, recommendation_root or self.root.parent / "recommendations"
         )
@@ -53,7 +54,7 @@ class DashboardViewModel:
             "watchlist": self.watchlist(latest.get("json") if latest else {}),
             "messages": self.messages(results),
             "runtime": runtime,
-            "recommendations": self._readonly.latest_recommendation(),
+            "recommendations": self._readonly.recommendation_for_date(self._recommendation_date) if self._recommendation_date else self._readonly.latest_recommendation(),
             "premarket_summary": self.summary(premarket),
             "kospi_leaders": self.market_leaders(premarket, "kospi", "KOSPI"),
             "kosdaq_leaders": self.market_leaders(premarket, "kosdaq", "KOSDAQ"),

@@ -9,6 +9,7 @@ class NotificationRequest:
     markdown_path: str | None = None
     json_path: str | None = None
     unique_nonce: str | None = None
+    dedupe_key: str | None = None
 
 @dataclass(frozen=True)
 class DeliveryResult:

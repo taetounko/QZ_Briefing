@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 import re
+from datetime import datetime
+from decimal import Decimal, InvalidOperation
 
 ACCOUNT = re.compile(r"(?<!\d)\d{8,12}(?!\d)")
 
@@ -12,6 +14,30 @@ def escape_markdown(text: object) -> str:
 
 def display(value: object, fallback: str = "자료 부족") -> str:
     return str(value) if value is not None and value != "" else fallback
+
+def format_won(value: object) -> str:
+    """Format a stored price without inventing a zero or rounding real decimals."""
+    if value is None or value == "" or isinstance(value, bool):
+        return "자료 없음"
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return "자료 없음"
+    if not number.is_finite():
+        return "자료 없음"
+    if number == number.to_integral_value():
+        return f"{number:,.0f}원"
+    rendered = f"{number:,f}".rstrip("0").rstrip(".")
+    return f"{rendered}원"
+
+def format_saved_time(value: object) -> str:
+    """Display the stored wall-clock value to seconds without timezone conversion."""
+    if value is None or value == "":
+        return "자료 없음"
+    try:
+        return datetime.fromisoformat(str(value)).strftime("%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return "자료 없음"
 
 def as_list(value: object) -> list[object]:
     return value if isinstance(value, list) else []
@@ -72,6 +98,49 @@ def format_briefing(result: dict[str, object]) -> str:
     if recommendations and not strong and not review: lines += ["", "오늘은 주봉 5주선 및 종합 기준을 충족한 추천 후보가 없습니다."]
     lines += ["","확정적인 매수·매도 지시가 아니며 조건 확인용입니다.",f"생성시각: {display(result.get('completed_at'), '-')}"]
     return mask_sensitive("\n".join(lines))
+
+def format_daily_recommendation(report: dict[str, object]) -> str:
+    """Format a persisted operational recommendation using shared safety helpers."""
+    def rows(name: str) -> list[dict[str, object]]:
+        value = report.get(name)
+        return [item for item in value[:3] if isinstance(item, dict)] if isinstance(value, list) else []
+
+    strong, review = rows("strong"), rows("review")
+    lines = [
+        f"[큐지 브리핑] 일일 추천 {display(report.get('trading_date'), '-')}", "",
+        f"전체 검토 종목: {display(report.get('universe_input_count', report.get('input_count')), '0')}",
+        f"주봉 MA5 통과 종목: {display(report.get('hard_filter_eligible_count', report.get('hard_filter_pass_count')), '0')}",
+        f"완전 강추: {len(strong)}개", f"추가 검토: {len(review)}개",
+        f"데이터 저장 시각: {format_saved_time(report.get('data_as_of'))}",
+    ]
+    for title, values in (("완전 강추", strong), ("추가 검토", review)):
+        lines.extend(["", f"[{title}]"])
+        if not values:
+            lines.append("- 기준 충족 종목 없음")
+        for row in values:
+            reasons = ", ".join(map(str, as_list(row.get("reasons"))[:2])) or "근거 자료 부족"
+            risks = ", ".join(map(str, as_list(row.get("risks"))[:2])) or "확인된 중대 위험 없음"
+            missing = ", ".join(map(str, as_list(row.get("missing"))[:2])) or "별도 부족 자료 없음"
+            lines.extend([
+                f"- {display(row.get('name'), '종목명 자료 부족')}({display(row.get('code'), '코드 자료 부족')}) · {display(row.get('total_score'), '-')}점",
+                f"  주봉 종가 / MA5: {format_won(row.get('weekly_close'))} / {format_won(row.get('weekly_ma5'))}",
+                f"  핵심 근거: {reasons}", f"  주요 위험: {risks}", f"  부족 자료: {missing}",
+            ])
+    lines.extend(["", "자동매매 신호가 아닙니다.", "추격매수는 금지하거나 각별히 주의해야 합니다.",
+                  "실제 주문 여부는 사용자가 직접 판단합니다.", f"저장된 분석 시점: {format_saved_time(report.get('data_as_of'))}"])
+    return mask_sensitive("\n".join(lines))
+
+
+def format_historical_daily_recommendation_test(report: dict[str, object]) -> str:
+    """Make an unmistakable opt-in test message for persisted historical data."""
+    normal = format_daily_recommendation(report).splitlines()
+    body = normal[1:] if normal else []
+    heading = [
+        f"[큐지 브리핑 테스트·과거자료] 일일 추천 {display(report.get('trading_date'), '-')}",
+        "테스트 전송", "과거 자료", f"기준일 {display(report.get('trading_date'), '-')}", "실시간 추천 아님",
+    ]
+    return mask_sensitive("\n".join(heading + body))
+
 
 def format_runtime_alert(message: str, occurred_at: str) -> str:
     return mask_sensitive(f"[QZ 운영 경고]\n{message}\nPC와 키움 로그인 상태를 확인해야 합니다.\n발생시각: {occurred_at}")

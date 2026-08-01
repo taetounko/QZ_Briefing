@@ -52,8 +52,8 @@ class NotificationService:
         self.stopping=True
         if self.timer is not None:self.timer.stop()
         self.executor.shutdown(wait=False,cancel_futures=True)
-    def _key(self,r): return f"telegram|{r.trading_date}|{r.event_type}|{hashlib.sha256(r.text.encode()).hexdigest()}" if not r.unique_nonce else f"test|{r.unique_nonce}"
-    def _item_key(self,item): return f"telegram|{item['trading_date']}|{item['event_type']}|{item['content_hash']}" if not str(item["id"]).startswith("test-") else f"test|{item['id']}"
+    def _key(self,r): return f"telegram|{r.trading_date}|{r.event_type}|{r.dedupe_key or hashlib.sha256(r.text.encode()).hexdigest()}" if not r.unique_nonce else f"test|{r.unique_nonce}"
+    def _item_key(self,item): return f"telegram|{item['trading_date']}|{item['event_type']}|{item.get('dedupe_key') or item['content_hash']}" if not str(item["id"]).startswith("test-") else f"test|{item['id']}"
     def _trim_history(self):
         cutoff=self.clock()-timedelta(days=30); self.history=[x for x in self.history if datetime.fromisoformat(x["delivered_at"])>=cutoff]; atomic_write_json(self.history_path,self.history)
 

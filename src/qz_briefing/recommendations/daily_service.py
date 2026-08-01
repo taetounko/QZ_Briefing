@@ -76,14 +76,15 @@ class RecommendationReportStore:
             os.replace(temporary,path)
         except Exception:
             temporary.unlink(missing_ok=True); raise
-    def save(self, trading_date: date, content_hash: str, payload: dict[str,object], markdown: str) -> tuple[Path,Path,Path]:
+    def save(self, trading_date: date, content_hash: str, payload: dict[str,object], markdown: str, *, update_latest: bool = True) -> tuple[Path,Path,Path]:
         directory=self.directory(trading_date); version=directory/"versions"/content_hash
         json_path=version/"daily_recommendations.json"; md_path=version/"daily_recommendations.md"
         metadata_path=version/"metadata.json"
         if not all(path.exists() for path in (json_path,md_path,metadata_path)):
             text=json.dumps(payload,ensure_ascii=False,sort_keys=True,indent=2)+"\n"
             self._atomic(json_path,text); self._atomic(md_path,markdown); self._atomic(metadata_path,text)
-        self._atomic(directory/"latest.json",json.dumps({"content_hash":content_hash,"version":str(version.relative_to(directory))},ensure_ascii=False)+"\n")
+        if update_latest:
+            self._atomic(directory/"latest.json",json.dumps({"content_hash":content_hash,"version":str(version.relative_to(directory))},ensure_ascii=False)+"\n")
         return json_path,md_path,metadata_path
     def load(self, trading_date: date) -> dict[str,object]|None:
         try:

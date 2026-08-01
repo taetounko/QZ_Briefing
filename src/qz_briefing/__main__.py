@@ -138,6 +138,8 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     commands.add_argument("--validate-full-universe-collection", action="store_true")
     commands.add_argument("--validate-full-collection-session", action="store_true")
     commands.add_argument("--validate-full-collection-cache", action="store_true")
+    commands.add_argument("--publish-full-collection-session", action="store_true")
+    commands.add_argument("--validate-operational-recommendation-publish", action="store_true")
     commands.add_argument("--diagnose-opt10081-live", action="store_true")
     commands.add_argument("--diagnose-kiwoom-login", action="store_true")
     commands.add_argument("--validate-live-recommendation-collection", action="store_true")
@@ -153,23 +155,33 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     parser.add_argument("--allow-kiwoom-live", action="store_true")
     parser.add_argument("--resume", nargs="?", const="", metavar="SESSION_ID")
     parser.add_argument("--session-id")
+    parser.add_argument("--report-date")
     parser.add_argument("--restart", action="store_true")
     parser.add_argument("--validation-root", type=Path)
     parser.add_argument("--full-universe-confirmed", action="store_true")
     parser.add_argument("--confirm-100-symbol-live", action="store_true")
+    parser.add_argument("--confirm-operational-publish", action="store_true")
+    parser.add_argument("--send-telegram", action="store_true")
+    parser.add_argument("--allow-historical-publish", action="store_true")
+    parser.add_argument("--allow-historical-telegram-test", action="store_true")
     parser.add_argument("--force-kiwoom-refresh", action="store_true")
     parser.add_argument("--remove-secret", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(raw)
-    if parsed.session_id and parsed.resume is None and not (parsed.validate_full_collection_session or parsed.validate_full_collection_cache):
+    session_commands = parsed.validate_full_collection_session or parsed.validate_full_collection_cache or parsed.publish_full_collection_session
+    if parsed.session_id and parsed.resume is None and not session_commands:
         parser.error("--session-id requires --resume")
     if parsed.session_id and parsed.resume not in (None, ""):
         parser.error("provide the resume session either after --resume or with --session-id, not both")
-    if parsed.session_id:
+    if parsed.session_id and not parsed.publish_full_collection_session:
         parsed.resume = parsed.session_id
     if parsed.remove_secret and not parsed.disable_telegram:
         parser.error("--remove-secret requires --disable-telegram")
     if parsed.diagnose_opt10081_live and not parsed.symbol:
         parser.error("--diagnose-opt10081-live requires --symbol")
+    if parsed.report_date and not parsed.dashboard:
+        parser.error("--report-date requires --dashboard")
+    if parsed.allow_historical_telegram_test and not (parsed.publish_full_collection_session and parsed.send_telegram):
+        parser.error("--allow-historical-telegram-test requires --publish-full-collection-session and --send-telegram")
     return parsed
 
 
@@ -473,6 +485,11 @@ def run(
     options = parse_cli_arguments(arguments)
     project_root = Path(__file__).resolve().parents[2]
     if options.dashboard:
+        try:
+            selected_report_date = date.fromisoformat(options.report_date) if options.report_date else None
+        except ValueError:
+            print("DASHBOARD STARTUP BLOCKED: --report-date must be YYYY-MM-DD", flush=True)
+            return 2
         application = application_factory(sys.argv if arguments is None else arguments)
         if hasattr(application, "setQuitOnLastWindowClosed"):
             application.setQuitOnLastWindowClosed(True)
@@ -496,6 +513,7 @@ def run(
         dashboard = dashboard_factory(
             root=project_root / "data" / "briefings",
             recommendation_root=project_root / "data" / "recommendations",
+            report_date=selected_report_date,
             connection_state=lambda: "저장 파일 기반 · Kiwoom 미연결",
             trading_day_status=market_label,
             shutdown=application.quit,
@@ -592,6 +610,44 @@ def run(
         except ValueError as exc:
             print(f"CROSS SESSION CACHE VALIDATION BLOCKED: {exc}"); return 2
         print_cross_session_cache_validation(result)
+        return 0 if result["success"] else 1
+    if options.validate_operational_recommendation_publish:
+        from qz_briefing.recommendations.operational_publish import (
+            print_operational_publish_validation, validate_operational_recommendation_publish,
+        )
+        result = validate_operational_recommendation_publish()
+        print_operational_publish_validation(result)
+        return 0 if result["success"] else 1
+    if options.publish_full_collection_session:
+        from qz_briefing.recommendations.operational_publish import print_publish_result, publish_full_collection_session
+        if not options.session_id:
+            print("OPERATIONAL_PUBLISH_BLOCKED=1")
+            print("BLOCK_REASON=session_id_required")
+            print("OPERATIONAL_WRITES=0")
+            print("TELEGRAM_SENDS=0")
+            return 2
+        try:
+            result = publish_full_collection_session(
+                project_root, options.session_id, dry_run=options.dry_run,
+                confirm_operational_publish=options.confirm_operational_publish,
+                allow_historical_publish=options.allow_historical_publish,
+                send_telegram=options.send_telegram,
+                allow_historical_telegram_test=options.allow_historical_telegram_test,
+                notification_service=(lambda: create_notification_service(project_root, project_root / "data")) if options.send_telegram else None,
+            )
+        except (RuntimeError, ValueError) as exc:
+            if str(exc) == "historical_telegram_test_confirmation_required":
+                print("TELEGRAM_BLOCKED=1")
+                print("BLOCK_REASON=historical_telegram_test_confirmation_required")
+                print("TELEGRAM_QUEUE_ADDS=0")
+                print("TELEGRAM_SENDS=0")
+                return 2
+            print("OPERATIONAL_PUBLISH_BLOCKED=1")
+            print(f"BLOCK_REASON={exc}")
+            print("OPERATIONAL_WRITES=0")
+            print("TELEGRAM_SENDS=0")
+            return 2
+        print_publish_result(result)
         return 0 if result["success"] else 1
     if options.collect_recommendation_universe:
         from qz_briefing.recommendations.full_universe_collection import run_full_collection_plan

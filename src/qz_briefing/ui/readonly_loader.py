@@ -55,6 +55,17 @@ class ReadOnlyDashboardLoader:
                 return loaded
         return {"report": None, "markdown": "", "metadata": None, "warning": NO_SAVED_RESULT}
 
+    def recommendation_for_date(self, target: date) -> dict[str, object]:
+        """Load one explicit operational history date without changing any pointer."""
+        directory = self.recommendation_root / "reports" / target.isoformat()
+        loaded = self._from_pointer(directory) or self._from_versions(directory)
+        if loaded is None:
+            return {"report": None, "markdown": "", "metadata": None, "warning": NO_SAVED_RESULT,
+                    "selected_report_date": target.isoformat(), "historical": True}
+        loaded["selected_report_date"] = target.isoformat()
+        loaded["historical"] = True
+        return loaded
+
     def _from_pointer(self, directory: Path) -> dict[str, object] | None:
         pointer = _object(directory / "latest.json")
         if pointer is None:

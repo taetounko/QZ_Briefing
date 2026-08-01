@@ -15,7 +15,7 @@ class PersistentNotificationQueue:
         except (OSError,ValueError): return []
     def add(self,request:NotificationRequest)->dict[str,object]:
         digest=hashlib.sha256(request.text.encode("utf-8")).hexdigest(); now=self.clock()
-        item={"id":request.unique_nonce or uuid.uuid4().hex,"channel":"telegram","event_type":request.event_type,"trading_date":request.trading_date,"created_at":now.isoformat(),"attempt_count":0,"next_attempt_at":now.isoformat(),"content_hash":digest,"payload":{"text":request.text,"markdown_path":request.markdown_path,"json_path":request.json_path},"last_error":""}
+        item={"id":request.unique_nonce or uuid.uuid4().hex,"channel":"telegram","event_type":request.event_type,"trading_date":request.trading_date,"created_at":now.isoformat(),"attempt_count":0,"next_attempt_at":now.isoformat(),"content_hash":digest,"dedupe_key":request.dedupe_key,"payload":{"text":request.text,"markdown_path":request.markdown_path,"json_path":request.json_path},"last_error":""}
         self.items.append(item); self.save(); return item
     def due(self):
         now=self.clock(); return [x for x in self.items if datetime.fromisoformat(x["next_attempt_at"])<=now and int(x["attempt_count"])<8]

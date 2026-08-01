@@ -19,6 +19,7 @@ from PyQt5.QtWidgets import (
 
 from .dashboard_view_model import DashboardViewModel
 from .formatters import money, number, percent, status_label
+from qz_briefing.notifications.formatter import format_saved_time, format_won
 from .tray_controller import DisabledTrayController, TrayController
 
 
@@ -40,6 +41,7 @@ class DashboardMainWindow(QMainWindow):
         trading_day_status: str, shutdown: Callable[[], None],
         open_folder: Callable[[], None] | None = None,
         recommendation_root: Path | None = None,
+        report_date: date | None = None,
         read_only: bool = False,
         standalone: bool = False,
         next_trading_day: Callable[[date], date | None] | None = None,
@@ -50,8 +52,9 @@ class DashboardMainWindow(QMainWindow):
         self._open_folder = open_folder or (lambda: os.startfile(str(self._root)))
         self._trading_day_status, self._background_notice_shown = trading_day_status, False
         self._read_only, self._standalone, self._shutdown = read_only, standalone, shutdown
+        self._report_date = report_date
         self._next_trading_day = next_trading_day or self._weekday_after
-        self._view_model = DashboardViewModel(root, recommendation_root=recommendation_root, clock=clock)
+        self._view_model = DashboardViewModel(root, recommendation_root=recommendation_root, recommendation_date=report_date, clock=clock)
         self._runtime_messages: list[str] = []
         self._file_messages: list[str] = []
         self.setWindowTitle("QZ 브리핑"); self.resize(1280, 820); self.setMinimumSize(960, 640)
@@ -112,6 +115,11 @@ class DashboardMainWindow(QMainWindow):
             badge = QLabel("읽기 전용")
             badge.setStyleSheet("font-weight: 700; color: #7a4d00; background: #fff3cd; border: 1px solid #e6c96b; border-radius: 8px; padding: 6px 12px;")
             title_row.addWidget(badge)
+        if self._report_date is not None:
+            historical = QLabel(f"과거 보고서  ·  기준일: {self._report_date.isoformat()}  ·  실시간 자료 아님")
+            historical.setObjectName("historicalReportBadge")
+            historical.setStyleSheet("font-weight:700;color:#8a3b00;background:#ffe8d2;border:1px solid #d98b45;border-radius:8px;padding:6px 12px;")
+            title_row.addWidget(historical)
         market_badge = QLabel(self._trading_day_status); market_badge.setStyleSheet("font-weight: 700; background: #e8f1fb; border-radius: 8px; padding: 6px 12px;")
         title_row.addWidget(market_badge); header_layout.addLayout(title_row)
         for labels in (
@@ -332,7 +340,8 @@ class DashboardMainWindow(QMainWindow):
         if total==0:
             self._recommendation_layout.addWidget(self._notice_card("현재 기준을 충족한 추천 후보가 없습니다."))
             return
-        summary=QLabel(f"최우선 후보 {report.get('strong_count',0)}개 · 추가 검토 {report.get('review_count',0)}개  |  기준 시각 {self._display_time(report.get('data_as_of'))}"); summary.setStyleSheet("font-weight:700;padding:8px;"); self._recommendation_layout.addWidget(summary)
+        prefix = f"과거 자료 · 기준일 {self._report_date.isoformat()} · 실시간 자료 아님  |  " if self._report_date else ""
+        summary=QLabel(f"{prefix}최우선 후보 {report.get('strong_count',0)}개 · 추가 검토 {report.get('review_count',0)}개  |  저장 시각 {self._display_time(report.get('data_as_of'))}"); summary.setObjectName("recommendationSummary"); summary.setStyleSheet("font-weight:700;padding:8px;"); self._recommendation_layout.addWidget(summary)
         for section,key,strong in groups:
             rows=report.get(key) if isinstance(report.get(key),list) else []
             if not rows: continue
@@ -346,8 +355,11 @@ class DashboardMainWindow(QMainWindow):
                 title=QLabel(f'{item.get("name") or "종목명 자료 부족"}  /  {item.get("code") or "코드 자료 부족"}'); title.setStyleSheet("font-size:17px;font-weight:700;")
                 grade=QLabel(f'{item.get("market") or "자료 부족"} · {item.get("grade") or section}'); grade.setStyleSheet("font-weight:700;color:#555;")
                 score=QLabel(f'{self._value(item.get("total_score"))}점'); score.setAlignment(Qt.AlignRight); score.setStyleSheet("font-size:24px;font-weight:800;color:#b71c1c;" if strong else "font-size:24px;font-weight:800;color:#555;")
-                core=self._card_label(f"데이터 신뢰도  {self._value(item.get('confidence'))}\n주봉 종가  {self._value(item.get('weekly_close'))}\nMA5  {self._value(item.get('weekly_ma5'))}\n이격률  {self._value(item.get('weekly_distance_rate'))}")
-                detail=self._card_label(f"핵심 근거\n{reasons}\n\n추격매수 금지  {'예' if item.get('chase_buying_prohibited') else '아니오'}\n무효화 조건  {invalid}")
+                distance = item.get("weekly_distance_rate")
+                distance_text = f"{distance:,.1f}%" if isinstance(distance, (int, float)) and not isinstance(distance, bool) else "자료 없음"
+                core=self._card_label(f"데이터 신뢰도  {self._value(item.get('confidence'))}\n주봉 종가  {format_won(item.get('weekly_close'))}\nMA5  {format_won(item.get('weekly_ma5'))}\n이격률  {distance_text}")
+                flows="; ".join(str(x) for x in item.get("flow_summary",[])) or "자료 부족"
+                detail=self._card_label(f"핵심 근거\n{reasons}\n\n수급 요약  {flows}\n추격매수 금지  {'예' if item.get('chase_buying_prohibited') else '아니오'}\n무효화 조건  {invalid}")
                 missing_label=self._card_label(f"부족 자료  {missing}"); missing_label.setStyleSheet("background:#fff8db;color:#725c00;padding:5px;border-radius:5px;" if missing!="없음" else "color:#555;")
                 risk_label=self._card_label(f"주요 위험  {risks}"); risk_label.setStyleSheet("background:#fff0df;color:#a34b00;padding:5px;border-radius:5px;" if risks!="없음" else "color:#555;")
                 grid.addWidget(title,0,0); grid.addWidget(score,0,1); grid.addWidget(grade,1,0,1,2); grid.addWidget(core,2,0); grid.addWidget(detail,2,1); grid.addWidget(missing_label,3,0); grid.addWidget(risk_label,3,1)
@@ -365,10 +377,7 @@ class DashboardMainWindow(QMainWindow):
 
     @staticmethod
     def _display_time(value: object) -> str:
-        if not value: return "기록 없음"
-        raw = str(value)
-        try: return datetime.fromisoformat(raw).strftime("%Y-%m-%d %H:%M")
-        except ValueError: return raw if len(raw) < 40 else "기록 있음"
+        return format_saved_time(value)
 
     @staticmethod
     def _weekday_after(target: date) -> date:
