@@ -11,11 +11,13 @@ from qz_briefing.__main__ import parse_cli_arguments, run
 from qz_briefing.recommendations.data_models import DataMetadata, StockMasterRecord
 from qz_briefing.recommendations.full_universe_collection import (
     CollectionProgress, FullCollectionSession, deterministic_universe, protected_validation_root,
-    remaining_counts,
+    failed_flow_repair_targets, failed_price_repair_targets, remaining_counts,
     run_full_collection_live, run_full_collection_plan,
     select_balanced_universe, select_flow_targets, should_abort_for_failures,
     validate_cross_session_cache, validate_full_collection_session, validate_live_scope, validate_scope,
 )
+from qz_briefing.recommendations import full_universe_collection as full_collection_module
+from qz_briefing.kiwoom import KiwoomTrTimeoutError
 from qz_briefing.recommendations.request_planner import PreliminaryCandidate
 
 
@@ -108,7 +110,7 @@ def test_collection_cli_blocks_unsafe_modes(tmp_path: Path, capsys, monkeypatch)
     assert "blocked inside Codex" in capsys.readouterr().out
 
 
-def test_live_scope_is_explicit_and_never_exceeds_twenty():
+def test_live_scope_is_explicit_and_preserves_twenty_without_confirmation():
     assert validate_live_scope(20) == 20
     with pytest.raises(ValueError): validate_live_scope(None)
     with pytest.raises(ValueError): validate_live_scope(21)
@@ -311,9 +313,15 @@ def test_live_stage_confirmation_rules_and_cli_option():
     with pytest.raises(ValueError,match="confirm_100_symbol_live_required"): validate_live_scope(21, False)
     assert validate_live_scope(21, True)==21
     assert validate_live_scope(100, True)==100
-    with pytest.raises(ValueError,match="max_symbols_exceeds_current_live_stage"): validate_live_scope(101, True)
+    with pytest.raises(ValueError,match="confirm_500_symbol_live_required"): validate_live_scope(101, True)
+    assert validate_live_scope(101, False, True)==101
+    assert validate_live_scope(500, False, True)==500
+    with pytest.raises(ValueError,match="confirm_500_symbol_live_required"): validate_live_scope(500, True, False)
+    with pytest.raises(ValueError,match="max_symbols_exceeds_current_live_stage"): validate_live_scope(501, True, True)
     parsed=parse_cli_arguments(["--collect-recommendation-universe","--allow-kiwoom-live","--max-symbols","100","--confirm-100-symbol-live"])
     assert parsed.confirm_100_symbol_live
+    parsed_500=parse_cli_arguments(["--collect-recommendation-universe","--allow-kiwoom-live","--max-symbols","500","--confirm-500-symbol-live"])
+    assert parsed_500.confirm_500_symbol_live
 
 
 def test_live_stage_blocks_before_qt_or_tr_even_with_full_confirmation(tmp_path):
@@ -321,9 +329,23 @@ def test_live_stage_blocks_before_qt_or_tr_even_with_full_confirmation(tmp_path)
     def forbidden(*args,**kwargs): calls.append("external"); raise AssertionError("external")
     with pytest.raises(ValueError,match="confirm_100_symbol_live_required"):
         run_full_collection_plan(tmp_path,dry_run=False,cached_only=False,allow_live=True,max_symbols=100,full_universe_confirmed=False,application_factory=forbidden,adapter_factory=forbidden)
-    with pytest.raises(ValueError,match="max_symbols_exceeds_current_live_stage"):
+    with pytest.raises(ValueError,match="confirm_500_symbol_live_required"):
         run_full_collection_plan(tmp_path,dry_run=False,cached_only=False,allow_live=True,max_symbols=101,full_universe_confirmed=True,confirm_100_symbol_live=True,application_factory=forbidden,adapter_factory=forbidden)
+    with pytest.raises(ValueError,match="confirm_500_symbol_live_required"):
+        run_full_collection_plan(tmp_path,dry_run=False,cached_only=False,allow_live=True,max_symbols=500,full_universe_confirmed=True,confirm_100_symbol_live=True,application_factory=forbidden,adapter_factory=forbidden)
+    with pytest.raises(ValueError,match="max_symbols_exceeds_current_live_stage"):
+        run_full_collection_plan(tmp_path,dry_run=False,cached_only=False,allow_live=True,max_symbols=501,full_universe_confirmed=True,confirm_100_symbol_live=True,confirm_500_symbol_live=True,application_factory=forbidden,adapter_factory=forbidden)
     assert calls==[]
+
+
+def test_five_hundred_plan_records_confirmation_tier_and_market_counts(tmp_path):
+    universe=[{"market":"KOSPI","code":f"1{i:05d}"} for i in range(250)]+[{"market":"KOSDAQ","code":f"2{i:05d}"} for i in range(250)]
+    session=FullCollectionSession(tmp_path,"five-hundred",clock=lambda:datetime(2026,8,1,10))
+    session.create(universe,mode="live_validation",symbol_limit=500,confirmed_500=True,target_date=date(2026,8,1))
+    plan=json.loads((session.path/"plan.json").read_text(encoding="utf-8"))
+    assert plan["confirmation_tier"]==500 and plan["confirm_500_symbol_live"] is True
+    assert plan["market_counts"]=={"KOSPI":250,"KOSDAQ":250} and len(plan["selected_symbols"])==500
+    assert plan["generated_at"] and "per-symbol" in plan["cache_compatibility"]
 
 
 def test_balanced_selection_scales_to_one_hundred_and_odd_limits():
@@ -335,6 +357,19 @@ def test_balanced_selection_scales_to_one_hundred_and_odd_limits():
     assert sum(row.metadata.market=="KOSPI" for row in odd)==50
     assert sum(row.metadata.market=="KOSDAQ" for row in odd)==49
     assert [row.metadata.code for row in hundred]==[row.metadata.code for row in select_balanced_universe(reversed(records),100)]
+
+
+def test_balanced_selection_scales_to_five_hundred_and_backfills_short_market():
+    records=[master(f"1{index:05d}","KOSPI") for index in range(300)]+[master(f"2{index:05d}","KOSDAQ") for index in range(300)]
+    selected=select_balanced_universe(reversed(records),500)
+    assert sum(row.metadata.market=="KOSPI" for row in selected)==250
+    assert sum(row.metadata.market=="KOSDAQ" for row in selected)==250
+    odd=select_balanced_universe(records,499)
+    assert sum(row.metadata.market=="KOSPI" for row in odd)==250 and sum(row.metadata.market=="KOSDAQ" for row in odd)==249
+    short=[master(f"1{index:05d}","KOSPI") for index in range(100)]+[master(f"2{index:05d}","KOSDAQ") for index in range(450)]
+    backfilled=select_balanced_universe(short,500)
+    assert len(backfilled)==500 and sum(row.metadata.market=="KOSPI" for row in backfilled)==100
+    assert [row.metadata.code for row in selected]==[row.metadata.code for row in select_balanced_universe(reversed(records),500)]
 
 
 class HundredAdapter(LiveAdapter):
@@ -421,7 +456,7 @@ def test_new_session_restores_compatible_symbols_from_smaller_completed_session(
     output=capsys.readouterr().out
     assert len([item for item in queues[1].requests if item[0]=="OPT10081"])==2
     assert "RESTORED_PRICE_SYMBOLS=2" in output and "LIVE_PRICE_SYMBOLS=2" in output
-    assert "PRICE_CACHE_HITS" not in output  # runtime uses restored/live counters; audit CLI provides cache aliases
+    assert "PRICE_CACHE_HITS=2" in output and "PRICE_CACHE_MISSES=2" in output
 
 
 def test_mock_hundred_session_artifact_validator_is_read_only_and_consistent(tmp_path, capsys):
@@ -457,3 +492,57 @@ def test_scoring_and_selector_receive_only_weekly_hard_filter_passes(tmp_path, c
     assert len(progress["hard_filter_pass_codes"])==1 and received==progress["hard_filter_pass_codes"]
     assert report["universe_input_count"]==2 and report["scoring_input_count"]==report["selector_input_count"]==1
     assert report["input_count"]==1
+
+
+def test_repair_cli_is_distinct_from_resume_and_requires_explicit_live_session():
+    parsed = parse_cli_arguments(["--collect-recommendation-universe", "--allow-kiwoom-live",
+        "--max-symbols", "500", "--confirm-500-symbol-live", "--repair-failed", "--session-id", "repair-session"])
+    assert parsed.repair_failed and parsed.resume is None and parsed.session_id == "repair-session"
+    with pytest.raises(SystemExit):
+        parse_cli_arguments(["--collect-recommendation-universe", "--allow-kiwoom-live", "--repair-failed"])
+    with pytest.raises(SystemExit):
+        parse_cli_arguments(["--collect-recommendation-universe", "--allow-kiwoom-live", "--repair-failed",
+                             "--session-id", "repair-session", "--resume"])
+
+
+def test_failed_repair_targets_skip_446_price_and_78_flow_successes():
+    price_completed = [f"{index:06d}" for index in range(446)]
+    price_failed = [f"{index:06d}" for index in range(446, 500)]
+    flow_completed = price_completed[:78]
+    flow_failed = price_failed[:18]
+    progress = CollectionProgress(500, 500, phase="completed", price_completed_codes=price_completed,
+        price_failed_codes=price_failed, flow_completed_codes=flow_completed, flow_failed_codes=flow_failed)
+    assert failed_price_repair_targets(progress) == price_failed
+    assert not (set(failed_price_repair_targets(progress)) & set(price_completed))
+    newly_hard_pass = price_failed[18:23]
+    targets = failed_flow_repair_targets(progress, flow_completed, flow_completed + newly_hard_pass)
+    assert targets == sorted(set(flow_failed + newly_hard_pass))
+    assert not (set(targets) & set(flow_completed))
+
+
+def test_consecutive_timeout_breaker_trips_at_three_and_success_resets():
+    progress = CollectionProgress(500, 500)
+    timeout = KiwoomTrTimeoutError("TR request timed out")
+    assert not full_collection_module._record_attempt_result(progress, timeout)
+    assert not full_collection_module._record_attempt_result(progress, timeout)
+    assert progress.consecutive_timeouts == 2
+    assert not full_collection_module._record_attempt_result(progress, None)
+    assert progress.consecutive_timeouts == 0
+    assert not full_collection_module._record_attempt_result(progress, timeout)
+    assert not full_collection_module._record_attempt_result(progress, timeout)
+    assert full_collection_module._record_attempt_result(progress, timeout)
+    assert progress.timeout_circuit_breaker == "TRIPPED"
+
+
+def test_failure_history_is_deduplicated_and_resolved(tmp_path):
+    session = FullCollectionSession(tmp_path, "repair", clock=lambda: datetime(2026, 8, 1, 12))
+    session.create([{"market": "KOSPI", "code": "000001"}], mode="live_validation", symbol_limit=1)
+    from qz_briefing.recommendations.data_models import CollectionFailure
+    failure = CollectionFailure("000001", "daily", "KiwoomTrTimeoutError: timeout", datetime(2026, 8, 1, 11))
+    session.append_failure(failure, repair_run_id="run-1")
+    session.append_failure(failure, repair_run_id="run-1")
+    payload = json.loads((session.path / "failures.json").read_text(encoding="utf-8"))
+    assert len(payload["failures"]) == 1 and payload["failures"][0]["attempt"] == 2
+    session.resolve_failure("000001", "daily", repair_run_id="run-1")
+    resolved = json.loads((session.path / "failures.json").read_text(encoding="utf-8"))["failures"][0]
+    assert resolved["resolved"] and resolved["resolved_at"] and resolved["repair_run_id"] == "run-1"

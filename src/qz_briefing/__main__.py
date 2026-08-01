@@ -154,12 +154,14 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     parser.add_argument("--cached-only", action="store_true")
     parser.add_argument("--allow-kiwoom-live", action="store_true")
     parser.add_argument("--resume", nargs="?", const="", metavar="SESSION_ID")
+    parser.add_argument("--repair-failed", action="store_true")
     parser.add_argument("--session-id")
     parser.add_argument("--report-date")
     parser.add_argument("--restart", action="store_true")
     parser.add_argument("--validation-root", type=Path)
     parser.add_argument("--full-universe-confirmed", action="store_true")
     parser.add_argument("--confirm-100-symbol-live", action="store_true")
+    parser.add_argument("--confirm-500-symbol-live", action="store_true")
     parser.add_argument("--confirm-operational-publish", action="store_true")
     parser.add_argument("--send-telegram", action="store_true")
     parser.add_argument("--allow-historical-publish", action="store_true")
@@ -167,12 +169,17 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     parser.add_argument("--force-kiwoom-refresh", action="store_true")
     parser.add_argument("--remove-secret", action="store_true", help=argparse.SUPPRESS)
     parsed = parser.parse_args(raw)
-    session_commands = parsed.validate_full_collection_session or parsed.validate_full_collection_cache or parsed.publish_full_collection_session
+    repair_command = parsed.collect_recommendation_universe and parsed.repair_failed
+    session_commands = parsed.validate_full_collection_session or parsed.validate_full_collection_cache or parsed.publish_full_collection_session or repair_command
     if parsed.session_id and parsed.resume is None and not session_commands:
         parser.error("--session-id requires --resume")
     if parsed.session_id and parsed.resume not in (None, ""):
         parser.error("provide the resume session either after --resume or with --session-id, not both")
-    if parsed.session_id and not parsed.publish_full_collection_session:
+    if parsed.repair_failed and not (parsed.collect_recommendation_universe and parsed.allow_kiwoom_live and parsed.session_id):
+        parser.error("--repair-failed requires --collect-recommendation-universe, --allow-kiwoom-live, and --session-id")
+    if parsed.repair_failed and parsed.resume is not None:
+        parser.error("--repair-failed is distinct from --resume")
+    if parsed.session_id and not (parsed.publish_full_collection_session or parsed.repair_failed):
         parsed.resume = parsed.session_id
     if parsed.remove_secret and not parsed.disable_telegram:
         parser.error("--remove-secret requires --disable-telegram")
@@ -657,7 +664,10 @@ def run(
                 allow_live=options.allow_kiwoom_live, max_symbols=options.max_symbols,
                 full_universe_confirmed=options.full_universe_confirmed,
                 confirm_100_symbol_live=options.confirm_100_symbol_live,
+                confirm_500_symbol_live=options.confirm_500_symbol_live,
                 validation_root=options.validation_root, resume=options.resume, restart=options.restart,
+                repair_failed=options.repair_failed,
+                repair_session_id=options.session_id if options.repair_failed else None,
                 application_factory=application_factory, adapter_factory=adapter_factory,
                 manager_factory=manager_factory, queue_factory=tr_queue_factory,
             )

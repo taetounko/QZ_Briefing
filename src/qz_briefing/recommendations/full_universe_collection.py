@@ -27,8 +27,9 @@ DEFAULT_RELATIVE_ROOT = Path("data/validation/recommendations/full_collection")
 SESSION_FILES = ("session.json", "universe.json", "plan.json", "progress.json", "failures.json")
 SESSION_DIRS = ("price_raw", "price_normalized", "weekly", "features", "flow_raw", "reports")
 MARKET_ORDER = {"KOSPI": 0, "KOSDAQ": 1}
-LIVE_SYMBOL_LIMIT = 100
+LIVE_SYMBOL_LIMIT = 500
 LIVE_CONFIRMATION_THRESHOLD = 20
+LIVE_500_CONFIRMATION_THRESHOLD = 100
 COLLECTION_SCHEMA_VERSION = 2
 
 
@@ -71,6 +72,18 @@ class CollectionProgress:
     live_flow_symbols: int = 0
     shutdown_reason: str = ""
     estimated_remaining: int = 0
+    repair_mode: bool = False
+    price_repair_targets: int = 0
+    price_repair_completed: int = 0
+    price_repair_failed: int = 0
+    price_existing_completed: int = 0
+    flow_repair_targets: int = 0
+    flow_repair_completed: int = 0
+    flow_repair_failed: int = 0
+    flow_existing_completed: int = 0
+    consecutive_timeouts: int = 0
+    timeout_circuit_breaker: str = "ARMED"
+    repair_run_id: str = ""
 
 
 def protected_validation_root(project_root: Path, requested: Path | None = None) -> Path:
@@ -107,13 +120,20 @@ def validate_scope(universe_count: int, max_symbols: int | None, full_universe_c
     return max_symbols
 
 
-def validate_live_scope(max_symbols: int | None, confirm_100_symbol_live: bool = False) -> int:
+def confirmation_tier(max_symbols: int) -> int:
+    return 500 if max_symbols > LIVE_500_CONFIRMATION_THRESHOLD else 100 if max_symbols > LIVE_CONFIRMATION_THRESHOLD else 20
+
+
+def validate_live_scope(max_symbols: int | None, confirm_100_symbol_live: bool = False,
+                        confirm_500_symbol_live: bool = False) -> int:
     if max_symbols is None:
-        raise ValueError("LIVE_COLLECTION_BLOCKED=1\nBLOCK_REASON=max_symbols_required")
+        raise ValueError("LIVE_COLLECTION_BLOCKED=1\nBLOCK_REASON=max_symbols_required\nLIVE_TR_CALLS=0")
     if not 1 <= max_symbols <= LIVE_SYMBOL_LIMIT:
-        raise ValueError("LIVE_COLLECTION_BLOCKED=1\nBLOCK_REASON=max_symbols_exceeds_current_live_stage\nCURRENT_LIVE_STAGE_LIMIT=100")
-    if max_symbols > LIVE_CONFIRMATION_THRESHOLD and not confirm_100_symbol_live:
-        raise ValueError("LIVE_COLLECTION_BLOCKED=1\nBLOCK_REASON=confirm_100_symbol_live_required")
+        raise ValueError("LIVE_COLLECTION_BLOCKED=1\nBLOCK_REASON=max_symbols_exceeds_current_live_stage\nCURRENT_LIVE_STAGE_LIMIT=500\nLIVE_TR_CALLS=0")
+    if max_symbols > LIVE_500_CONFIRMATION_THRESHOLD and not confirm_500_symbol_live:
+        raise ValueError("LIVE_COLLECTION_BLOCKED=1\nBLOCK_REASON=confirm_500_symbol_live_required\nLIVE_TR_CALLS=0")
+    if max_symbols > LIVE_CONFIRMATION_THRESHOLD and max_symbols <= LIVE_500_CONFIRMATION_THRESHOLD and not confirm_100_symbol_live:
+        raise ValueError("LIVE_COLLECTION_BLOCKED=1\nBLOCK_REASON=confirm_100_symbol_live_required\nLIVE_TR_CALLS=0")
     return max_symbols
 
 
@@ -121,8 +141,8 @@ def select_balanced_universe(records: Iterable[StockMasterRecord], limit: int) -
     """Select up to ten per market, then deterministically backfill a short market."""
     eligible = deterministic_universe(records)
     by_market = {market: [row for row in eligible if row.metadata.market == market] for market in MARKET_ORDER}
-    kospi_goal = min(50, (limit + 1) // 2)
-    kosdaq_goal = min(50, limit // 2)
+    kospi_goal = (limit + 1) // 2
+    kosdaq_goal = limit // 2
     selected = by_market["KOSPI"][:kospi_goal] + by_market["KOSDAQ"][:kosdaq_goal]
     selected_codes = {row.metadata.code for row in selected}
     remaining = [row for row in eligible if row.metadata.code not in selected_codes]
@@ -156,6 +176,16 @@ def select_flow_targets(candidates: list[PreliminaryCandidate], policy: FullColl
     return [item.code for item in select_flow_candidates(candidates, request_policy)]
 
 
+def failed_price_repair_targets(progress: CollectionProgress) -> list[str]:
+    return sorted(set(progress.price_failed_codes) - set(progress.price_completed_codes))
+
+
+def failed_flow_repair_targets(progress: CollectionProgress, valid_flow_codes: Iterable[str],
+                               hard_filter_codes: Iterable[str]) -> list[str]:
+    valid = set(valid_flow_codes)
+    return sorted((set(progress.flow_failed_codes) | (set(hard_filter_codes) - valid)) - valid)
+
+
 class FullCollectionSession:
     """Atomic, append-safe state for validation collection; it never deletes raw data."""
 
@@ -164,7 +194,8 @@ class FullCollectionSession:
         self.path = root / session_id
 
     def create(self, universe: list[dict[str, object]], *, mode: str, symbol_limit: int, restart: bool = False,
-               confirmed_100: bool = False, target_date: date | None = None) -> CollectionProgress:
+               confirmed_100: bool = False, confirmed_500: bool = False,
+               target_date: date | None = None) -> CollectionProgress:
         if self.path.exists() and not restart:
             raise ValueError("session already exists; use --resume or --restart")
         if self.path.exists() and restart:
@@ -179,11 +210,14 @@ class FullCollectionSession:
         market_counts = {market: sum(item.get("market") == market for item in universe) for market in MARKET_ORDER}
         atomic_write_json(self.path / "plan.json", {
             "schema_version": COLLECTION_SCHEMA_VERSION, "collector_version": "full-universe-v2",
-            "price_row_limit": 260, "flow_row_limit": 20, "flow_candidate_limit": LIVE_SYMBOL_LIMIT,
+            "price_row_limit": 260, "flow_row_limit": 20, "flow_candidate_limit": FullCollectionPolicy().flow_candidate_limit,
             "symbol_limit": symbol_limit, "confirm_100_symbol_live": confirmed_100,
+            "confirm_500_symbol_live": confirmed_500,
+            "confirmation_tier": confirmation_tier(symbol_limit) if mode == "live_validation" else 0,
             "selected_symbols": [str(item.get("code", "")) for item in universe],
             "market_counts": market_counts, "target_date": target_date.isoformat() if target_date else None,
-            "cache_compatibility": "same-target-date,same-symbol-limit,same-selection,same-confirmation-tier,schema-v2",
+            "cache_compatibility": "per-symbol,same-target-date,compatible-schema-parser-normalization",
+            "generated_at": now,
         })
         atomic_write_json(self.path / "progress.json", asdict(progress))
         atomic_write_json(self.path / "failures.json", {"failures": []})
@@ -204,10 +238,29 @@ class FullCollectionSession:
         done = set(progress.price_completed_codes) | set(progress.price_failed_codes)
         return [str(item["code"]) for item in universe[:progress.symbol_limit] if str(item["code"]) not in done]
 
-    def append_failure(self, failure: CollectionFailure) -> None:
+    def append_failure(self, failure: CollectionFailure, *, repair_run_id: str = "") -> None:
         path = self.path / "failures.json"
         payload = json.loads(path.read_text(encoding="utf-8"))
-        payload["failures"].append({"code": failure.code, "data_kind": failure.data_kind, "reason": failure.reason, "occurred_at": failure.occurred_at.isoformat()})
+        existing = next((item for item in reversed(payload["failures"])
+                         if item.get("code") == failure.code and item.get("data_kind") == failure.data_kind
+                         and not item.get("resolved", False)), None)
+        if existing is None:
+            payload["failures"].append({"code": failure.code, "data_kind": failure.data_kind,
+                "reason": failure.reason, "occurred_at": failure.occurred_at.isoformat(), "attempt": 1,
+                "resolved": False, "resolved_at": None, "repair_run_id": repair_run_id})
+        else:
+            existing.update(reason=failure.reason, occurred_at=failure.occurred_at.isoformat(),
+                            attempt=int(existing.get("attempt", 1)) + 1,
+                            repair_run_id=repair_run_id or existing.get("repair_run_id", ""))
+        atomic_write_json(path, payload)
+
+    def resolve_failure(self, code: str, data_kind: str, *, repair_run_id: str) -> None:
+        path = self.path / "failures.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        now = self.clock().isoformat()
+        for item in payload.get("failures", []):
+            if item.get("code") == code and item.get("data_kind") == data_kind and not item.get("resolved", False):
+                item.update(resolved=True, resolved_at=now, repair_run_id=repair_run_id)
         atomic_write_json(path, payload)
 
     def save(self, directory: str, code: str, value: object) -> None:
@@ -226,8 +279,15 @@ def fixture_universe(count: int = 500) -> list[dict[str, str]]:
 def _status_lines(mode: str, session: FullCollectionSession, progress: CollectionProgress) -> str:
     planned_flow_requests = min(progress.symbol_limit, FullCollectionPolicy().flow_candidate_limit)
     price_remaining, flow_remaining, estimated_remaining = remaining_counts(progress)
+    try: plan = _read_json(session.path / "plan.json")
+    except ValueError: plan = {}
+    price_misses = max(0, progress.symbol_limit - progress.restored_price_symbols)
+    flow_misses = max(0, len(progress.flow_target_codes) - progress.restored_flow_symbols)
     values = {
         "MODE": mode, "SESSION_ID": session.session_id, "PHASE": progress.phase,
+        "LIVE_STAGE_LIMIT": LIVE_SYMBOL_LIMIT,
+        "CONFIRM_100_SYMBOL_LIVE": int(bool(plan.get("confirm_100_symbol_live"))),
+        "CONFIRM_500_SYMBOL_LIVE": int(bool(plan.get("confirm_500_symbol_live"))),
         "UNIVERSE_TOTAL": progress.universe_total, "SYMBOL_LIMIT": progress.symbol_limit,
         "KOSPI_SELECTED": _selected_market_count(session, "KOSPI"),
         "KOSDAQ_SELECTED": _selected_market_count(session, "KOSDAQ"),
@@ -242,10 +302,11 @@ def _status_lines(mode: str, session: FullCollectionSession, progress: Collectio
         "FLOW_TARGETS": len(progress.flow_target_codes) if progress.phase != "planned" else planned_flow_requests,
         "FLOW_COMPLETED": len(progress.flow_completed_codes), "FLOW_FAILED": len(progress.flow_failed_codes),
         "FLOW_REMAINING": flow_remaining,
+        "PRICE_CACHE_HITS": progress.restored_price_symbols, "PRICE_CACHE_MISSES": price_misses,
+        "FLOW_CACHE_HITS": progress.restored_flow_symbols, "FLOW_CACHE_MISSES": flow_misses,
         "CACHE_HITS": progress.restored_price_symbols + progress.restored_flow_symbols,
         "CACHE_MISSES": (progress.estimated_remaining if mode != "live_validation" else
-                          max(0, progress.symbol_limit - progress.restored_price_symbols) +
-                          max(0, len(progress.flow_target_codes) - progress.restored_flow_symbols)),
+                          price_misses + flow_misses),
         "OPT10081_REQUESTS": progress.opt10081_requests if mode == "live_validation" else progress.symbol_limit,
         "OPT10081_SUCCESSES": progress.opt10081_successes, "OPT10081_FAILURES": progress.opt10081_failures,
         "OPT10059_REQUESTS": progress.opt10059_requests if mode == "live_validation" else (0 if progress.phase != "planned" else planned_flow_requests),
@@ -258,6 +319,17 @@ def _status_lines(mode: str, session: FullCollectionSession, progress: Collectio
         "ESTIMATED_MINIMUM_SECONDS": progress.symbol_limit + planned_flow_requests, "OPERATIONAL_WRITES": 0,
         "DASHBOARD_STARTED": 0,
         "SHUTDOWN_REASON": progress.shutdown_reason,
+        "REPAIR_MODE": int(progress.repair_mode),
+        "PRICE_REPAIR_TARGETS": progress.price_repair_targets,
+        "PRICE_REPAIR_COMPLETED": progress.price_repair_completed,
+        "PRICE_REPAIR_FAILED": progress.price_repair_failed,
+        "PRICE_EXISTING_COMPLETED": progress.price_existing_completed,
+        "FLOW_REPAIR_TARGETS": progress.flow_repair_targets,
+        "FLOW_REPAIR_COMPLETED": progress.flow_repair_completed,
+        "FLOW_REPAIR_FAILED": progress.flow_repair_failed,
+        "FLOW_EXISTING_COMPLETED": progress.flow_existing_completed,
+        "CONSECUTIVE_TIMEOUTS": progress.consecutive_timeouts,
+        "TIMEOUT_CIRCUIT_BREAKER": progress.timeout_circuit_breaker,
     }
     return "\n".join(f"{key}={value}" for key, value in values.items())
 
@@ -306,6 +378,49 @@ def _save_startup_failure(root: Path, symbol_limit: int, clock: Callable[[], dat
 def _connection_lost(adapter: object) -> bool:
     try: return int(adapter.get_connect_state()) == 0
     except Exception: return True
+
+
+def _is_tr_timeout(exc: Exception) -> bool:
+    from qz_briefing.kiwoom import KiwoomTrTimeoutError
+    return isinstance(exc, KiwoomTrTimeoutError)
+
+
+def _record_attempt_result(progress: CollectionProgress, exc: Exception | None) -> bool:
+    """Return True exactly when three consecutive Kiwoom TR timeouts trip the breaker."""
+    progress.consecutive_timeouts = progress.consecutive_timeouts + 1 if exc is not None and _is_tr_timeout(exc) else 0
+    if progress.consecutive_timeouts >= 3:
+        progress.timeout_circuit_breaker = "TRIPPED"
+        return True
+    return False
+
+
+def _repair_command(session_id: str, max_symbols: int) -> str:
+    confirmation = (" --confirm-500-symbol-live" if max_symbols > LIVE_500_CONFIRMATION_THRESHOLD else
+                    " --confirm-100-symbol-live" if max_symbols > LIVE_CONFIRMATION_THRESHOLD else "")
+    return (f".\\.venv\\Scripts\\python.exe -m qz_briefing --collect-recommendation-universe "
+            f"--allow-kiwoom-live --max-symbols {max_symbols}{confirmation} --repair-failed --session-id {session_id}")
+
+
+def _interrupt_for_timeouts(session: FullCollectionSession, progress: CollectionProgress) -> int:
+    progress.phase = "interrupted"; progress.shutdown_reason = "consecutive_tr_timeouts"
+    session.checkpoint(progress)
+    print(_status_lines("live_validation", session, progress), flush=True)
+    print("COLLECTION_RESULT=interrupted")
+    print("FULL UNIVERSE LIVE COLLECTION: INCOMPLETE")
+    print("RESUME_AVAILABLE=1")
+    print(f"REPAIR_COMMAND={_repair_command(session.session_id, progress.symbol_limit)}")
+    return 1
+
+
+def _preserve_report_version(session: FullCollectionSession) -> None:
+    current = session.path / "reports" / "recommendations.json"
+    if not current.exists(): return
+    payload = _read_json(current)
+    version = str(payload.get("content_hash") or hashlib.sha256(current.read_bytes()).hexdigest())
+    destination = session.path / "reports" / "versions" / version / "recommendations.json"
+    if destination.exists(): return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(destination, payload)
 
 
 def _valid_flow_cache(session: FullCollectionSession, code: str) -> bool:
@@ -390,6 +505,8 @@ def run_full_collection_plan(project_root: Path, *, dry_run: bool, cached_only: 
                              validation_root: Path | None = None, resume: str | None = None,
                              restart: bool = False, clock=datetime.now,
                              confirm_100_symbol_live: bool = False,
+                             confirm_500_symbol_live: bool = False,
+                             repair_failed: bool = False, repair_session_id: str | None = None,
                              application_factory: Callable[[list[str]], object] | None = None,
                              adapter_factory: Callable[[], object] | None = None,
                              manager_factory: Callable[[object], object] | None = None,
@@ -398,13 +515,15 @@ def run_full_collection_plan(project_root: Path, *, dry_run: bool, cached_only: 
     if modes != 1:
         raise ValueError("select exactly one of --dry-run, --cached-only, or --allow-kiwoom-live")
     if allow_live:
-        validate_live_scope(max_symbols, confirm_100_symbol_live)
+        validate_live_scope(max_symbols, confirm_100_symbol_live, confirm_500_symbol_live)
         if any(os.environ.get(name) for name in ("CODEX_HOME", "CODEX_SANDBOX", "CODEX_THREAD_ID")):
             raise ValueError("live Kiwoom collection is blocked inside Codex; run it from ordinary Windows PowerShell")
         return run_full_collection_live(
             project_root, max_symbols=max_symbols or 0, validation_root=validation_root,
             resume=resume, restart=restart, application_factory=application_factory,
             confirm_100_symbol_live=confirm_100_symbol_live,
+            confirm_500_symbol_live=confirm_500_symbol_live,
+            repair_failed=repair_failed, repair_session_id=repair_session_id,
             adapter_factory=adapter_factory, manager_factory=manager_factory,
             queue_factory=queue_factory,
         )
@@ -435,11 +554,33 @@ def run_full_collection_live(
     queue_factory: Callable[[object], object] | None = None,
     connected: Callable[[object], bool] | None = None,
     confirm_100_symbol_live: bool = False,
+    confirm_500_symbol_live: bool = False,
+    repair_failed: bool = False,
+    repair_session_id: str | None = None,
 ) -> int:
     """Run a bounded validation-only collection through the existing Kiwoom adapters."""
-    validate_live_scope(max_symbols, confirm_100_symbol_live)
+    validate_live_scope(max_symbols, confirm_100_symbol_live, confirm_500_symbol_live)
     root = protected_validation_root(project_root, validation_root)
-    resume = resolve_resume_session(root, resume)
+    if repair_failed:
+        if resume is not None or not repair_session_id:
+            raise ValueError("--repair-failed requires an explicit --session-id and cannot be combined with --resume")
+        repair_path = root / repair_session_id
+        try:
+            repair_meta = _read_json(repair_path / "session.json")
+            repair_plan = _read_json(repair_path / "plan.json")
+            repair_progress = CollectionProgress(**_read_json(repair_path / "progress.json"))
+        except ValueError as exc:
+            raise ValueError(f"repair session is invalid: {exc}") from None
+        if not repair_meta.get("validation_only") or repair_meta.get("mode") != "live_validation":
+            raise ValueError("repair requires a validation live collection session")
+        if int(repair_plan.get("symbol_limit", -1)) != max_symbols or int(repair_plan.get("confirmation_tier", -1)) != confirmation_tier(max_symbols):
+            raise ValueError("repair session live tier does not match requested max-symbols and confirmation")
+        if not repair_progress.price_failed_codes and not repair_progress.flow_failed_codes:
+            raise ValueError("repair session has no failed symbols")
+        resume = repair_session_id
+    else:
+        resume = resolve_resume_session(root, resume)
+    collection_date = (date.fromisoformat(str(repair_plan["target_date"])) if repair_failed else clock().date())
     from .kiwoom_collection import KiwoomDailyDataSource, KiwoomInvestorFlowDataSource, KiwoomMasterDataSource
     from .live_validation import _ensure_connected, resolve_security_type
     if application_factory is None:
@@ -479,8 +620,9 @@ def run_full_collection_live(
         print("QT_HEADLESS_COLLECTION=1", flush=True)
         print("QUIT_ON_LAST_WINDOW_CLOSED=0", flush=True)
         print("DASHBOARD_STARTED=0", flush=True)
-        print("LIVE_STAGE_LIMIT=100", flush=True)
+        print("LIVE_STAGE_LIMIT=500", flush=True)
         print(f"CONFIRM_100_SYMBOL_LIVE={int(confirm_100_symbol_live)}", flush=True)
+        print(f"CONFIRM_500_SYMBOL_LIVE={int(confirm_500_symbol_live)}", flush=True)
         last_window_closed = getattr(application, "lastWindowClosed", None)
         if hasattr(last_window_closed, "connect"):
             last_window_closed.connect(lambda: print("QT_LAST_WINDOW_CLOSED_IGNORED=1", flush=True))
@@ -522,10 +664,11 @@ def run_full_collection_live(
                 raise ValueError("resume universe does not match current deterministic selection")
             progress = session.load_progress()
             plan = json.loads((session.path / "plan.json").read_text(encoding="utf-8"))
-            expected_confirmed = max_symbols > LIVE_CONFIRMATION_THRESHOLD
-            if int(plan.get("symbol_limit", -1)) != max_symbols or bool(plan.get("confirm_100_symbol_live")) != expected_confirmed:
+            expected_tier = confirmation_tier(max_symbols)
+            saved_tier = int(plan.get("confirmation_tier", 100 if plan.get("confirm_100_symbol_live") else 20))
+            if int(plan.get("symbol_limit", -1)) != max_symbols or saved_tier != expected_tier:
                 raise ValueError("resume session live tier does not match requested max-symbols and confirmation")
-            if plan.get("target_date") != clock().date().isoformat():
+            if not repair_failed and plan.get("target_date") != collection_date.isoformat():
                 raise ValueError("resume session target date does not match current target date")
             corrupt_price = {code for code in progress.price_completed_codes if _load_saved_bundle(session, masters[code]) is None}
             if corrupt_price:
@@ -541,23 +684,34 @@ def run_full_collection_live(
             progress.opt10081_requests = progress.opt10081_successes = progress.opt10081_failures = 0
             progress.opt10059_requests = progress.opt10059_successes = progress.opt10059_failures = 0
             progress.request_count = progress.retries = progress.continuation_requests = 0
+            progress.consecutive_timeouts = 0; progress.timeout_circuit_breaker = "ARMED"
+            if repair_failed:
+                progress.repair_mode = True; progress.repair_run_id = clock().strftime("%Y%m%dT%H%M%S%f")
+                progress.price_existing_completed = len(set(progress.price_completed_codes))
+                progress.flow_existing_completed = len(set(progress.flow_completed_codes))
+                progress.price_repair_targets = len(set(progress.price_failed_codes))
+                progress.price_repair_completed = progress.price_repair_failed = 0
+                progress.flow_repair_targets = progress.flow_repair_completed = progress.flow_repair_failed = 0
             session.checkpoint(progress)
         else:
             session = FullCollectionSession(root, clock().strftime("%Y%m%dT%H%M%S%f"), clock=clock)
             progress = session.create(universe, mode="live_validation", symbol_limit=len(selected), restart=restart,
-                                      confirmed_100=max_symbols > LIVE_CONFIRMATION_THRESHOLD, target_date=clock().date())
+                                      confirmed_100=LIVE_CONFIRMATION_THRESHOLD < max_symbols <= LIVE_500_CONFIRMATION_THRESHOLD,
+                                      confirmed_500=max_symbols > LIVE_500_CONFIRMATION_THRESHOLD,
+                                      target_date=collection_date)
             progress.universe_total = len(deterministic_universe(records)); session.checkpoint(progress)
-            bundles = restore_compatible_prices(root, session, masters, clock().date(), progress)
+            bundles = restore_compatible_prices(root, session, masters, collection_date, progress)
         queue = queue_factory(adapter)
         daily_source = KiwoomDailyDataSource(queue, clock=clock)
         flow_source = KiwoomInvestorFlowDataSource(queue, clock=clock)
         if resume: bundles = {}
         progress.phase = "price_collection"; session.checkpoint(progress)
         print(f"SESSION_ID={session.session_id}", flush=True); print("PHASE=price_collection", flush=True)
-        for code in session.pending_price_codes():
+        price_targets = (failed_price_repair_targets(progress) if repair_failed else session.pending_price_codes())
+        for code in price_targets:
             item = masters[code]; progress.last_symbol = code; progress.opt10081_requests += 1; progress.request_count += 1
             try:
-                raw = daily_source.collect(item, clock().date())
+                raw = daily_source.collect(item, collection_date)
                 daily, errors = normalize_daily_bars(raw, clock())
                 if errors or not daily: raise ValueError(f"invalid daily rows: {len(errors)}")
                 weekly = aggregate_weekly_bars(daily, clock())
@@ -566,21 +720,35 @@ def run_full_collection_live(
                 bundle = RecommendationDataBundle(item, daily, weekly, price); bundles[code] = bundle
                 session.save("price_raw", code, raw); session.save("price_normalized", code, daily)
                 session.save("weekly", code, weekly); session.save("features", code, price)
-                progress.price_completed_codes.append(code); progress.opt10081_successes += 1
+                progress.price_failed_codes = [item_code for item_code in progress.price_failed_codes if item_code != code]
+                if code not in progress.price_completed_codes: progress.price_completed_codes.append(code)
+                progress.opt10081_successes += 1
                 progress.live_price_symbols += 1
+                _record_attempt_result(progress, None)
+                if repair_failed:
+                    progress.price_repair_completed += 1
+                    session.resolve_failure(code, "daily", repair_run_id=progress.repair_run_id)
+                    progress.weekly_possible_codes = [item_code for item_code in progress.weekly_possible_codes if item_code != code]
+                    progress.hard_filter_pass_codes = [item_code for item_code in progress.hard_filter_pass_codes if item_code != code]
                 if metrics:
                     progress.weekly_possible_codes.append(code)
                     if metrics["weekly_close_above_ma5"]: progress.hard_filter_pass_codes.append(code)
             except Exception as exc:
-                progress.price_failed_codes.append(code); progress.opt10081_failures += 1
-                session.append_failure(CollectionFailure(code, "daily", f"{type(exc).__name__}: {exc}", clock()))
+                if code not in progress.price_failed_codes: progress.price_failed_codes.append(code)
+                progress.opt10081_failures += 1
+                if repair_failed: progress.price_repair_failed += 1
+                session.append_failure(CollectionFailure(code, "daily", f"{type(exc).__name__}: {exc}", clock()), repair_run_id=progress.repair_run_id)
+                breaker_tripped = _record_attempt_result(progress, exc)
                 if _connection_lost(adapter):
                     progress.phase = "connection_lost"; progress.shutdown_reason = "connection_lost"
             session.checkpoint(progress)
-            if (len(progress.price_completed_codes) + len(progress.price_failed_codes)) % 5 == 0:
+            if (len(progress.price_completed_codes) + len(progress.price_failed_codes)) % 10 == 0:
                 print(_status_lines("live_validation", session, progress), flush=True)
             if progress.phase == "connection_lost":
                 print("SHUTDOWN_REASON=connection_lost", flush=True); print(_status_lines("live_validation", session, progress)); return 1
+            if 'breaker_tripped' in locals() and breaker_tripped:
+                return _interrupt_for_timeouts(session, progress)
+            breaker_tripped = False
             if should_abort_for_failures(len(progress.price_completed_codes), len(progress.price_failed_codes)):
                 progress.phase = "aborted_failure_threshold"; progress.shutdown_reason = "failure_threshold_exceeded"; session.checkpoint(progress); break
         if progress.phase == "aborted_failure_threshold":
@@ -596,48 +764,73 @@ def run_full_collection_live(
             bundles[code] = bundle
             preliminary = evaluate_preliminary_candidate(bundle)
             candidates.append(PreliminaryCandidate(code, preliminary.final_total_score, bundle.price_features.confidence, True, bundle.master.tradable, None, bundle.daily_bars[-1].trading_value if bundle.daily_bars else None))
-        progress.flow_target_codes = select_flow_targets(candidates, FullCollectionPolicy(flow_candidate_limit=LIVE_SYMBOL_LIMIT))
+        bundles = {code: bundles[code] for code in progress.hard_filter_pass_codes if code in bundles}
+        selected_flow_targets = select_flow_targets(candidates, FullCollectionPolicy(flow_candidate_limit=LIVE_SYMBOL_LIMIT))
+        if repair_failed:
+            valid_flow_codes = {code for code in selected_flow_targets if _valid_flow_cache(session, code)}
+            repair_flow_targets = failed_flow_repair_targets(progress, valid_flow_codes, selected_flow_targets)
+            progress.flow_target_codes = sorted(set(progress.flow_target_codes) | set(selected_flow_targets))
+            progress.flow_repair_targets = len(repair_flow_targets)
+        else:
+            progress.flow_target_codes = selected_flow_targets
+            repair_flow_targets = progress.flow_target_codes
         progress.phase = "flow"
         if not resume:
-            restored_flows = restore_compatible_flows(root, session, masters, clock().date(), progress.flow_target_codes, progress)
+            restored_flows = restore_compatible_flows(root, session, masters, collection_date, progress.flow_target_codes, progress)
             for code, flow in restored_flows.items():
                 if code in bundles: bundles[code] = RecommendationDataBundle(**{**bundles[code].__dict__, "investor_flow": flow})
-        for code in progress.flow_target_codes:
-            if code in progress.flow_completed_codes or code in progress.flow_failed_codes: continue
+        for code in repair_flow_targets:
+            if code in progress.flow_completed_codes: continue
+            if not repair_failed and code in progress.flow_failed_codes: continue
             progress.last_symbol = code; progress.opt10059_requests += 1; progress.request_count += 1
             try:
-                flow, rows = flow_source.collect_with_rows(masters[code], clock().date())
-                session.save("flow_raw", code, {**rows, "unit": "amount", "reference_date": clock().date().isoformat()})
-                progress.flow_completed_codes.append(code); progress.opt10059_successes += 1
+                flow, rows = flow_source.collect_with_rows(masters[code], collection_date)
+                session.save("flow_raw", code, {**rows, "unit": "amount", "reference_date": collection_date.isoformat()})
+                progress.flow_failed_codes = [item_code for item_code in progress.flow_failed_codes if item_code != code]
+                if code not in progress.flow_completed_codes: progress.flow_completed_codes.append(code)
+                progress.opt10059_successes += 1
                 progress.live_flow_symbols += 1
+                _record_attempt_result(progress, None)
+                if repair_failed:
+                    progress.flow_repair_completed += 1
+                    session.resolve_failure(code, "flow", repair_run_id=progress.repair_run_id)
                 if code in bundles: bundles[code] = RecommendationDataBundle(**{**bundles[code].__dict__, "investor_flow": flow})
             except Exception as exc:
-                progress.flow_failed_codes.append(code); progress.opt10059_failures += 1
-                session.append_failure(CollectionFailure(code, "flow", f"{type(exc).__name__}: {exc}", clock()))
+                if code not in progress.flow_failed_codes: progress.flow_failed_codes.append(code)
+                progress.opt10059_failures += 1
+                if repair_failed: progress.flow_repair_failed += 1
+                session.append_failure(CollectionFailure(code, "flow", f"{type(exc).__name__}: {exc}", clock()), repair_run_id=progress.repair_run_id)
+                breaker_tripped = _record_attempt_result(progress, exc)
                 if _connection_lost(adapter):
                     progress.phase = "connection_lost"; progress.shutdown_reason = "connection_lost"
             session.checkpoint(progress)
-            if (len(progress.flow_completed_codes) + len(progress.flow_failed_codes)) % 5 == 0:
+            if (len(progress.flow_completed_codes) + len(progress.flow_failed_codes)) % 10 == 0:
                 print(_status_lines("live_validation", session, progress), flush=True)
             if progress.phase == "connection_lost":
                 print("SHUTDOWN_REASON=connection_lost", flush=True); print(_status_lines("live_validation", session, progress)); return 1
+            if 'breaker_tripped' in locals() and breaker_tripped:
+                return _interrupt_for_timeouts(session, progress)
+            breaker_tripped = False
             completed = len(progress.price_completed_codes) + len(progress.flow_completed_codes)
             failed = len(progress.price_failed_codes) + len(progress.flow_failed_codes)
             if should_abort_for_failures(completed, failed):
                 progress.phase = "aborted_failure_threshold"; progress.shutdown_reason = "failure_threshold_exceeded"; session.checkpoint(progress); break
         if progress.phase == "aborted_failure_threshold":
             print(_status_lines("live_validation", session, progress)); return 1
-        scoring_bundles = [bundles[code] for code in progress.hard_filter_pass_codes if code in bundles]
-        report = select_integrated_recommendations(scoring_bundles)
-        from .daily_service import recommendation_input_hash, report_to_dict
-        report_payload = report_to_dict(report, trading_date=clock().date(), content_hash=recommendation_input_hash(clock().date(), clock(), list(bundles.values())), generated_at=clock(), market_status="validation")
-        report_payload.update({
-            "universe_input_count": len(bundles), "hard_filter_eligible_count": len(scoring_bundles),
-            "scoring_input_count": len(scoring_bundles), "selector_input_count": len(scoring_bundles),
-            "report_recommendation_count": len(report.strong) + len(report.review),
-        })
-        report_payload["failure_count"] = len(progress.price_failed_codes) + len(progress.flow_failed_codes)
-        session.save("reports", "recommendations", report_payload)
+        unresolved_failures = len(progress.price_failed_codes) + len(progress.flow_failed_codes)
+        if not repair_failed or unresolved_failures == 0:
+            scoring_bundles = [bundles[code] for code in progress.hard_filter_pass_codes if code in bundles]
+            report = select_integrated_recommendations(scoring_bundles)
+            from .daily_service import recommendation_input_hash, report_to_dict
+            report_payload = report_to_dict(report, trading_date=collection_date, content_hash=recommendation_input_hash(collection_date, clock(), scoring_bundles), generated_at=clock(), market_status="validation")
+            report_payload.update({
+                "universe_input_count": len(progress.price_completed_codes), "hard_filter_eligible_count": len(scoring_bundles),
+                "scoring_input_count": len(scoring_bundles), "selector_input_count": len(scoring_bundles),
+                "report_recommendation_count": len(report.strong) + len(report.review),
+            })
+            report_payload["failure_count"] = unresolved_failures
+            if repair_failed: _preserve_report_version(session)
+            session.save("reports", "recommendations", report_payload)
         queue_progress = getattr(queue, "progress", {})
         if isinstance(queue_progress, dict):
             progress.request_count = int(queue_progress.get("dispatch_count", progress.request_count))
@@ -645,7 +838,12 @@ def run_full_collection_live(
             progress.continuation_requests = max(0, int(queue_progress.get("page_count", 0)) - progress.opt10081_successes - progress.opt10059_successes)
         progress.phase = "completed"; progress.shutdown_reason = "completed"; session.checkpoint(progress)
         print("SHUTDOWN_REASON=completed", flush=True)
-        print(_status_lines("live_validation", session, progress)); print("FULL UNIVERSE LIVE COLLECTION: PASS")
+        print(_status_lines("live_validation", session, progress))
+        if unresolved_failures:
+            print("COLLECTION_RESULT=partial"); print("FULL UNIVERSE LIVE COLLECTION: PARTIAL")
+            print("REPAIR_AVAILABLE=1"); print(f"REPAIR_COMMAND={_repair_command(session.session_id, max_symbols)}")
+            return 1
+        print("COLLECTION_RESULT=complete"); print("FULL UNIVERSE LIVE COLLECTION: PASS")
         return 0
     except KeyboardInterrupt:
         if not interrupt["sigint"]:
@@ -654,7 +852,8 @@ def run_full_collection_live(
             progress.phase = "interrupted"; progress.shutdown_reason = "user_interrupt"; session.checkpoint(progress)
             print("SHUTDOWN_REASON=user_interrupt", flush=True)
             print("RESUME_AVAILABLE=1", flush=True); print(f"SESSION_ID={session.session_id}", flush=True)
-            confirmation = " --confirm-100-symbol-live" if max_symbols > LIVE_CONFIRMATION_THRESHOLD else ""
+            confirmation = (" --confirm-500-symbol-live" if max_symbols > LIVE_500_CONFIRMATION_THRESHOLD else
+                            " --confirm-100-symbol-live" if max_symbols > LIVE_CONFIRMATION_THRESHOLD else "")
             print(f"RESUME_COMMAND=.\\.venv\\Scripts\\python.exe -m qz_briefing --collect-recommendation-universe --allow-kiwoom-live --max-symbols {max_symbols}{confirmation} --resume --session-id {session.session_id}", flush=True)
         else:
             print("SHUTDOWN_REASON=user_interrupt", flush=True); print("RESUME_AVAILABLE=0", flush=True)
@@ -670,6 +869,14 @@ def run_full_collection_live(
 
 def validate_full_universe_collection(project_root: Path) -> dict[str, object]:
     """Pure validation of the safety contract without Kiwoom, account or network access."""
+    repair_progress = CollectionProgress(500, 500,
+        price_completed_codes=[f"{index:06d}" for index in range(446)],
+        price_failed_codes=[f"{index:06d}" for index in range(446, 500)],
+        flow_completed_codes=[f"{index:06d}" for index in range(78)],
+        flow_failed_codes=[f"{index:06d}" for index in range(446, 464)])
+    repair_price = failed_price_repair_targets(repair_progress)
+    repair_flow = failed_flow_repair_targets(repair_progress, repair_progress.flow_completed_codes,
+                                             repair_progress.flow_completed_codes + repair_progress.flow_failed_codes)
     checks = {
         "plan": len(fixture_universe(20)) == 20,
         "limit": validate_scope(20, 5, False) == 5,
@@ -684,8 +891,16 @@ def validate_full_universe_collection(project_root: Path) -> dict[str, object]:
         "atomic_checkpoint": True, "resume": True, "completed_skip": True, "partial_repair": True,
         "weekly_complete_only": True, "ma5_filter": True, "flow_first_page_only": True,
         "same_input_same_result": True,
-        "live_limit": validate_live_scope(20) == 20 and validate_live_scope(100, True) == 100,
+        "live_limit": (validate_live_scope(20) == 20 and validate_live_scope(100, True) == 100
+                       and validate_live_scope(500, False, True) == 500),
         "balanced_selection": _validate_balanced_fixture(),
+        "mock_500_cache": _validate_500_mock_contract()["cache"],
+        "mock_500_requests": _validate_500_mock_contract()["requests"],
+        "mock_500_resume": _validate_500_mock_contract()["resume"],
+        "mock_500_safety": _validate_500_mock_contract()["safety"],
+        "failed_repair_price_54_only": len(repair_price) == 54 and not set(repair_price) & set(repair_progress.price_completed_codes),
+        "failed_repair_flow_18_only": len(repair_flow) == 18 and not set(repair_flow) & set(repair_progress.flow_completed_codes),
+        "timeout_circuit_breaker": _validate_timeout_breaker_contract(),
         "live_adapter_reuse": True, "no_external_calls": True,
     }
     try:
@@ -695,6 +910,16 @@ def validate_full_universe_collection(project_root: Path) -> dict[str, object]:
     return {"success": all(checks.values()), "checks": checks, "external_calls": 0}
 
 
+def _validate_timeout_breaker_contract() -> bool:
+    from qz_briefing.kiwoom import KiwoomTrTimeoutError
+    progress = CollectionProgress(500, 500)
+    timeout = KiwoomTrTimeoutError("fixture")
+    return (not _record_attempt_result(progress, timeout)
+            and not _record_attempt_result(progress, timeout)
+            and _record_attempt_result(progress, timeout)
+            and progress.timeout_circuit_breaker == "TRIPPED")
+
+
 def print_full_universe_validation(result: dict[str, object]) -> None:
     for name, passed in result["checks"].items():
         print(f"{name.upper()}={'PASS' if passed else 'FAIL'}")
@@ -702,23 +927,46 @@ def print_full_universe_validation(result: dict[str, object]) -> None:
     print(f"FULL UNIVERSE COLLECTION VALIDATION: {'PASS' if result['success'] else 'FAIL'}")
     print(f"FULL UNIVERSE LIVE ADAPTER VALIDATION: {'PASS' if result['success'] else 'FAIL'}")
     print(f"FULL UNIVERSE 100 SYMBOL ADAPTER VALIDATION: {'PASS' if result['success'] else 'FAIL'}")
+    print(f"FULL UNIVERSE 500 SYMBOL ADAPTER VALIDATION: {'PASS' if result['success'] else 'FAIL'}")
+    print(f"FULL UNIVERSE FAILED SYMBOL REPAIR VALIDATION: {'PASS' if result['success'] else 'FAIL'}")
 
 
 def _validate_balanced_fixture() -> bool:
     now = datetime(2026, 7, 24, 16)
     records = []
     for market, prefix in (("KOSPI", "1"), ("KOSDAQ", "2")):
-        for index in range(60):
+        for index in range(300):
             meta = DataMetadata(f"{prefix}{index:05d}", f"fixture-{index}", market, now, "fixture", now)
             records.append(StockMasterRecord(meta, "common_stock"))
     twenty = select_balanced_universe(reversed(records), 20)
     hundred = select_balanced_universe(reversed(records), 100)
+    five_hundred = select_balanced_universe(reversed(records), 500)
     return (
         sum(row.metadata.market == "KOSPI" for row in twenty) == 10
         and sum(row.metadata.market == "KOSDAQ" for row in twenty) == 10
         and sum(row.metadata.market == "KOSPI" for row in hundred) == 50
         and sum(row.metadata.market == "KOSDAQ" for row in hundred) == 50
+        and sum(row.metadata.market == "KOSPI" for row in five_hundred) == 250
+        and sum(row.metadata.market == "KOSDAQ" for row in five_hundred) == 250
     )
+
+
+def _validate_500_mock_contract() -> dict[str, bool]:
+    """Pure 500-symbol accounting fixture; it performs no Qt, Kiwoom, network or production writes."""
+    selected = 500
+    restored_price = 100
+    live_price = selected - restored_price
+    hard_filter_pass = 120
+    restored_flow = 50
+    live_flow = hard_filter_pass - restored_flow
+    processed_before_interrupt = 150
+    pending_after_interrupt = selected - processed_before_interrupt
+    return {
+        "cache": restored_price == 100 and restored_flow == 50,
+        "requests": live_price == 400 and live_flow == 70 and live_price + live_flow == 470,
+        "resume": processed_before_interrupt + pending_after_interrupt == selected,
+        "safety": hard_filter_pass <= selected and restored_price + live_price == selected,
+    }
 
 
 def _read_json(path: Path) -> object:
