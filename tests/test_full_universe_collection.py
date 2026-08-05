@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 import json
+import hashlib
 import signal
 from pathlib import Path
 
@@ -19,6 +20,14 @@ from qz_briefing.recommendations.full_universe_collection import (
 from qz_briefing.recommendations import full_universe_collection as full_collection_module
 from qz_briefing.kiwoom import KiwoomTrTimeoutError
 from qz_briefing.recommendations.request_planner import PreliminaryCandidate
+from qz_briefing.recommendations.partitioned_full_universe import (
+    ParentSymbol, apply_mock_batch, choose_flow_candidates, create_parent_collection,
+    deterministic_parent_universe, finalize_mock_report, finalize_price_phase,
+    load_universe_snapshot, next_batch, verify_parent_collection,
+)
+from qz_briefing.recommendations.full_universe_snapshot import (
+    build_full_universe_snapshot, save_snapshot, snapshot_payload,
+)
 
 
 def master(code: str, market: str = "KOSPI", *, security_type: str = "common_stock") -> StockMasterRecord:
@@ -99,14 +108,28 @@ def test_dry_run_cli_creates_only_validation_session(tmp_path: Path, capsys, mon
     assert not (tmp_path / "data/recommendations").exists()
 
 
-def test_collection_cli_blocks_unsafe_modes(tmp_path: Path, capsys, monkeypatch):
+def test_collection_cli_requires_full_universe_confirmation(tmp_path: Path, capsys, monkeypatch):
     from qz_briefing.recommendations import full_universe_collection as module
     original = module.run_full_collection_plan
     monkeypatch.setattr(module, "run_full_collection_plan", lambda _project_root, **kwargs: original(tmp_path, **kwargs))
     common = ["--collect-recommendation-universe", "--validation-root", str(tmp_path / "data/validation/recommendations/full_collection")]
-    assert run(common + ["--dry-run"]) == 2
+    assert run(common + ["--dry-run"], application_factory=forbidden, adapter_factory=forbidden, manager_factory=forbidden, tr_queue_factory=forbidden) == 2
     assert "full collection requires --full-universe-confirmed" in capsys.readouterr().out
-    assert run(common + ["--allow-kiwoom-live", "--max-symbols", "20"]) == 2
+
+
+def test_collection_cli_blocks_unsafe_modes(tmp_path: Path, capsys, monkeypatch):
+    from qz_briefing.recommendations import full_universe_collection as module
+    original = module.run_full_collection_plan
+    monkeypatch.setattr(module, "run_full_collection_plan", lambda _project_root, **kwargs: original(tmp_path, **kwargs))
+    monkeypatch.setenv("CODEX_THREAD_ID", "test-thread")
+    common = ["--collect-recommendation-universe", "--validation-root", str(tmp_path / "data/validation/recommendations/full_collection")]
+    assert run(
+        common + ["--allow-kiwoom-live", "--max-symbols", "20"],
+        application_factory=forbidden,
+        adapter_factory=forbidden,
+        manager_factory=forbidden,
+        tr_queue_factory=forbidden,
+    ) == 2
     assert "blocked inside Codex" in capsys.readouterr().out
 
 
@@ -546,3 +569,208 @@ def test_failure_history_is_deduplicated_and_resolved(tmp_path):
     session.resolve_failure("000001", "daily", repair_run_id="run-1")
     resolved = json.loads((session.path / "failures.json").read_text(encoding="utf-8"))["failures"][0]
     assert resolved["resolved"] and resolved["resolved_at"] and resolved["repair_run_id"] == "run-1"
+
+
+def partition_symbols(count=2510):
+    return [ParentSymbol("KOSPI" if index < 1255 else "KOSDAQ", f"{index:06d}", str(index)) for index in range(count)]
+
+
+def partition_snapshot(count=2510):
+    rows = [{"market": item.market, "code": item.code, "name": item.name} for item in partition_symbols(count)]
+    digest = hashlib.sha256(json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return {"schema_version": 1, "parser_version": "full-universe-v2", "created_at": "2026-08-01T09:00:00",
+            "source": "fixture", "trade_date": "2026-08-01", "kospi_master_codes": min(count, 1255),
+            "kosdaq_master_codes": max(0, count - 1255), "master_codes_total": count,
+            "filtered_universe_total": count, "excluded_total": 0, "duplicates": 0,
+            "invalid_codes": 0, "symbols": rows, "universe_hash": digest}
+
+
+def test_partitioned_manifest_covers_2510_once_in_eleven_price_batches(tmp_path):
+    path = create_parent_collection(tmp_path, reversed(partition_symbols()), collection_id="parent",
+        trade_date=date(2026, 8, 1), clock=lambda: datetime(2026, 8, 1, 9))
+    manifest, progress = verify_parent_collection(path)
+    assert manifest["universe_total"] == 2510
+    assert [len(batch) for batch in manifest["price_batches"]] == [250] * 10 + [10]
+    flattened = [code for batch in manifest["price_batches"] for code in batch]
+    assert len(flattened) == len(set(flattened)) == 2510
+    assert progress["phase"] == "planned"
+
+
+def test_partitioned_universe_is_market_then_six_digit_code_deterministic():
+    rows = [ParentSymbol("KOSDAQ", "000002"), ParentSymbol("KOSPI", "000003"),
+            ParentSymbol("KOSPI", "000001"), ParentSymbol("KOSPI", "000001"), ParentSymbol("ETF", "123456")]
+    expected = [("KOSPI", "000001"), ("KOSPI", "000003"), ("KOSDAQ", "000002")]
+    assert [(row.market, row.code) for row in deterministic_parent_universe(rows)] == expected
+    assert [(row.market, row.code) for row in deterministic_parent_universe(reversed(rows))] == expected
+
+
+def test_partitioned_manifest_and_universe_hash_tampering_is_blocked(tmp_path):
+    path = create_parent_collection(tmp_path, partition_symbols(10), collection_id="parent", trade_date=date(2026, 8, 1))
+    manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8")); manifest["price_batch_size"] = 499
+    (path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="manifest hash mismatch"): verify_parent_collection(path)
+
+
+def test_partitioned_each_invocation_advances_exactly_one_batch(tmp_path):
+    path = create_parent_collection(tmp_path, partition_symbols(600), collection_id="parent", trade_date=date(2026, 8, 1))
+    assert apply_mock_batch(path)["index"] == 1
+    _, progress = verify_parent_collection(path)
+    assert [batch["status"] for batch in progress["price_batches"]] == ["complete", "pending", "pending"]
+    assert apply_mock_batch(path)["index"] == 2
+
+
+def test_partitioned_timeout_breaker_blocks_next_batch_until_resume_or_repair(tmp_path):
+    path = create_parent_collection(tmp_path, partition_symbols(500), collection_id="parent", trade_date=date(2026, 8, 1))
+    first_codes = verify_parent_collection(path)[0]["price_batches"][0]
+    result = apply_mock_batch(path, fail_codes=first_codes[:3])
+    assert result["status"] == "interrupted" and result["live_requests"] == 3
+    with pytest.raises(ValueError, match="repair or resume"): next_batch(path)
+
+
+def test_partitioned_resume_never_requests_completed_symbols_twice(tmp_path):
+    path = create_parent_collection(tmp_path, partition_symbols(250), collection_id="parent", trade_date=date(2026, 8, 1))
+    interrupted = apply_mock_batch(path, interrupt_after=10)
+    assert interrupted["completed"] == 10
+    _, progress = verify_parent_collection(path); progress["price_batches"][0]["status"] = "pending"
+    atomic_path = path / "progress.json"
+    from qz_briefing.runtime.unattended import atomic_write_json
+    atomic_write_json(atomic_path, progress)
+    resumed = apply_mock_batch(path)
+    assert resumed["live_requests"] == 240 and resumed["completed"] == 250
+
+
+def test_partitioned_repair_requests_only_failed_symbols(tmp_path):
+    path = create_parent_collection(tmp_path, partition_symbols(10), collection_id="parent", trade_date=date(2026, 8, 1), price_batch_size=10)
+    codes = verify_parent_collection(path)[0]["price_batches"][0]
+    result = apply_mock_batch(path, fail_codes={codes[-1]})
+    assert result["status"] == "partial" and result["completed"] == 9
+    repaired = apply_mock_batch(path, repair=True)
+    assert repaired["symbols"] == repaired["live_requests"] == 1 and repaired["status"] == "complete"
+
+
+def test_partitioned_flow_selection_waits_for_all_prices_and_is_capped_deterministically(tmp_path):
+    path = create_parent_collection(tmp_path, partition_symbols(251), collection_id="parent", trade_date=date(2026, 8, 1))
+    apply_mock_batch(path)
+    with pytest.raises(ValueError, match="all price batches"): finalize_price_phase(path, {})
+    apply_mock_batch(path)
+    _, progress = verify_parent_collection(path)
+    scores = {code: 50.0 for code in progress["price_completed_codes"]}
+    selected = finalize_price_phase(path, scores)
+    assert len(selected) == 120 and selected == sorted(selected)
+    assert [len(batch["codes"]) for batch in verify_parent_collection(path)[1]["flow_batches"]] == [40, 40, 40]
+
+
+def test_partitioned_cache_hits_do_not_count_as_live_requests_and_final_report_is_validation_only(tmp_path):
+    path = create_parent_collection(tmp_path, partition_symbols(120), collection_id="parent", trade_date=date(2026, 8, 1))
+    price_codes = verify_parent_collection(path)[0]["price_batches"][0]
+    price = apply_mock_batch(path, cache_codes=price_codes)
+    assert price["cache_hits"] == 120 and price["live_requests"] == 0
+    finalize_price_phase(path, {code: 100.0 for code in price_codes})
+    flow_codes = verify_parent_collection(path)[1]["flow_candidate_codes"]
+    flow = apply_mock_batch(path, cache_codes=flow_codes)
+    assert flow["cache_hits"] == 40 and flow["live_requests"] == 0
+    apply_mock_batch(path, cache_codes=flow_codes); apply_mock_batch(path, cache_codes=flow_codes)
+    report = finalize_mock_report(path)
+    assert report["validation_only"] and not (tmp_path / "data/recommendations").exists()
+
+
+def test_partitioned_confirmation_is_blocked_before_factories(monkeypatch, capsys):
+    assert run(["--collect-recommendation-universe", "--full-universe", "--allow-kiwoom-live",
+                "--run-next-batch", "--collection-id", "parent"]) == 2
+    output = capsys.readouterr().out
+    assert "BLOCK_REASON=confirm_full_universe_live_required" in output and "LIVE_TR_CALLS=0" in output
+
+
+def test_partitioned_plan_only_auto_id_creates_complete_offline_plan(tmp_path, monkeypatch, capsys):
+    from qz_briefing.recommendations import partitioned_full_universe as module
+    validation_root = tmp_path / "full_universe"; validation_root.mkdir(parents=True)
+    snapshot = partition_snapshot()
+    (validation_root / "universe.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    monkeypatch.setattr(module, "partitioned_root", lambda _project_root: validation_root)
+    assert run(["--collect-recommendation-universe", "--full-universe", "--allow-kiwoom-live",
+                "--confirm-full-universe-live", "--plan-only", "--price-batch-size", "250",
+                "--flow-batch-size", "40"], application_factory=forbidden, adapter_factory=forbidden,
+               clock=lambda: datetime(2026, 8, 1, 12, 34, 56, 123456)) == 0
+    output = capsys.readouterr().out
+    collection_id = "20260801T123456123456"; path = validation_root / collection_id
+    assert f"COLLECTION_ID={collection_id}" in output and "PLAN_ONLY=1" in output
+    assert "UNIVERSE_TOTAL=2510" in output and "PRICE_BATCH_COUNT=11" in output
+    assert "PARENT_PHASE=planned" in output and "LIVE_TR_CALLS=0" in output
+    assert "FULL UNIVERSE PARTITIONED PLAN: PASS" in output
+    assert all((path / name).exists() for name in ("manifest.json", "progress.json", "failures.json"))
+    manifest, progress = verify_parent_collection(path)
+    flattened = [code for batch in manifest["price_batches"] for code in batch]
+    assert len(flattened) == len(set(flattened)) == 2510 and progress["phase"] == "planned"
+
+
+@pytest.mark.parametrize("extra", [["--run-next-batch"], ["--run-next-batch", "--resume"],
+                                    ["--run-next-batch", "--repair-failed"]])
+def test_partitioned_continuation_commands_require_collection_id(extra, capsys):
+    assert run(["--collect-recommendation-universe", "--full-universe", "--allow-kiwoom-live",
+                "--confirm-full-universe-live", *extra], application_factory=forbidden,
+               adapter_factory=forbidden) == 2
+    output = capsys.readouterr().out
+    assert "BLOCK_REASON=collection_id_required" in output and "LIVE_TR_CALLS=0" in output
+
+
+def test_snapshot_builder_confirmation_and_live_flag_block_before_factories(capsys):
+    assert run(["--build-full-universe-snapshot", "--allow-kiwoom-live"],
+               application_factory=forbidden, adapter_factory=forbidden) == 2
+    assert "confirm_full_universe_snapshot_live_required" in capsys.readouterr().out
+    assert run(["--build-full-universe-snapshot", "--confirm-full-universe-snapshot-live"],
+               application_factory=forbidden, adapter_factory=forbidden) == 2
+    assert "allow_kiwoom_live_required" in capsys.readouterr().out
+
+
+def test_snapshot_builder_uses_only_master_apis_and_loader_accepts_output(tmp_path):
+    calls = []
+    class SnapshotAdapter(LiveAdapter):
+        def __getattribute__(self, name):
+            target = super().__getattribute__(name)
+            if name.startswith("get_") and callable(target):
+                def tracked(*args, **kwargs): calls.append(name); return target(*args, **kwargs)
+                return tracked
+            return target
+    result = build_full_universe_snapshot(tmp_path, application_factory=lambda _: LiveApplication(),
+        adapter_factory=SnapshotAdapter, manager_factory=LiveManager, connected=lambda _: True,
+        clock=lambda: datetime(2026, 8, 1, 9))
+    payload = load_universe_snapshot(result["path"])
+    assert payload["filtered_universe_total"] == 24
+    assert result["master_api_calls"] == 2 + 24 * 6
+    allowed = {"get_connect_state", "get_code_list_by_market", "get_master_code_name", "get_master_stock_state",
+               "get_master_construction", "get_master_stock_info", "get_master_listed_stock_date", "get_master_last_price"}
+    assert calls and all(name in allowed for name in calls)
+    assert not any("request" in name.lower() or "comm" in name.lower() for name in calls)
+
+
+def test_snapshot_builder_reuses_existing_universe_filter():
+    now = datetime(2026, 8, 1, 9)
+    def row(code, market, name, security="common_stock", tradable=True, status="normal"):
+        return StockMasterRecord(DataMetadata(code, name, market, now, "fixture", now), security, tradable, status)
+    payload = snapshot_payload([row("000001", "KOSPI", "normal"), row("000002", "KOSDAQ", "ETF", "etf"),
+        row("000003", "KOSPI", "halt", tradable=False, status="trading_halt"), row("BAD", "KOSPI", "bad"),
+        row("000004", "KOSDAQ", "")], raw_market_counts={"KOSPI": 3, "KOSDAQ": 2}, clock=lambda: now)
+    assert [item["code"] for item in payload["symbols"]] == ["000001"]
+    assert payload["invalid_codes"] == 1 and payload["missing_names"] == 1 and payload["excluded_total"] == 4
+
+
+def test_snapshot_atomic_replace_preserves_version_and_failed_candidate_preserves_current(tmp_path):
+    first = partition_snapshot(10); path = save_snapshot(tmp_path, first)
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="already_exists"): save_snapshot(tmp_path, first)
+    assert path.read_bytes() == before
+    second = partition_snapshot(11); second["created_at"] = "2026-08-01T10:00:00"
+    save_snapshot(tmp_path, second, replace=True)
+    backups = list((path.parent / "snapshots").glob("*.json"))
+    assert len(backups) == 1 and load_universe_snapshot(backups[0])["universe_hash"] == first["universe_hash"]
+    broken = dict(second); broken["universe_hash"] = "broken"
+    current = path.read_bytes()
+    with pytest.raises(ValueError, match="hash mismatch"): save_snapshot(tmp_path, broken, replace=True)
+    assert path.read_bytes() == current and not list(path.parent.glob("*.tmp"))
+
+
+def test_snapshot_builder_login_failure_creates_no_snapshot(tmp_path):
+    with pytest.raises(RuntimeError, match="login_failed"):
+        build_full_universe_snapshot(tmp_path, application_factory=lambda _: LiveApplication(),
+            adapter_factory=LiveAdapter, manager_factory=LiveManager, connected=lambda _: False)
+    assert not (tmp_path / "data/validation/recommendations/full_universe/universe.json").exists()

@@ -136,6 +136,9 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     commands.add_argument("--collect-recommendation-data", action="store_true")
     commands.add_argument("--collect-recommendation-universe", action="store_true")
     commands.add_argument("--validate-full-universe-collection", action="store_true")
+    commands.add_argument("--validate-partitioned-full-universe-collection", action="store_true")
+    commands.add_argument("--build-full-universe-snapshot", action="store_true")
+    commands.add_argument("--validate-full-universe-snapshot-builder", action="store_true")
     commands.add_argument("--validate-full-collection-session", action="store_true")
     commands.add_argument("--validate-full-collection-cache", action="store_true")
     commands.add_argument("--publish-full-collection-session", action="store_true")
@@ -162,6 +165,15 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
     parser.add_argument("--full-universe-confirmed", action="store_true")
     parser.add_argument("--confirm-100-symbol-live", action="store_true")
     parser.add_argument("--confirm-500-symbol-live", action="store_true")
+    parser.add_argument("--full-universe", action="store_true")
+    parser.add_argument("--confirm-full-universe-live", action="store_true")
+    parser.add_argument("--confirm-full-universe-snapshot-live", action="store_true")
+    parser.add_argument("--replace-full-universe-snapshot", action="store_true")
+    parser.add_argument("--plan-only", action="store_true")
+    parser.add_argument("--run-next-batch", action="store_true")
+    parser.add_argument("--collection-id")
+    parser.add_argument("--price-batch-size", type=int, default=250)
+    parser.add_argument("--flow-batch-size", type=int, default=40)
     parser.add_argument("--confirm-operational-publish", action="store_true")
     parser.add_argument("--send-telegram", action="store_true")
     parser.add_argument("--allow-historical-publish", action="store_true")
@@ -175,9 +187,10 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
         parser.error("--session-id requires --resume")
     if parsed.session_id and parsed.resume not in (None, ""):
         parser.error("provide the resume session either after --resume or with --session-id, not both")
-    if parsed.repair_failed and not (parsed.collect_recommendation_universe and parsed.allow_kiwoom_live and parsed.session_id):
+    if parsed.repair_failed and not (parsed.collect_recommendation_universe and parsed.allow_kiwoom_live and
+                                     (parsed.session_id or parsed.full_universe)):
         parser.error("--repair-failed requires --collect-recommendation-universe, --allow-kiwoom-live, and --session-id")
-    if parsed.repair_failed and parsed.resume is not None:
+    if parsed.repair_failed and parsed.resume is not None and not parsed.full_universe:
         parser.error("--repair-failed is distinct from --resume")
     if parsed.session_id and not (parsed.publish_full_collection_session or parsed.repair_failed):
         parsed.resume = parsed.session_id
@@ -189,6 +202,17 @@ def parse_cli_arguments(arguments: Sequence[str] | None = None) -> argparse.Name
         parser.error("--report-date requires --dashboard")
     if parsed.allow_historical_telegram_test and not (parsed.publish_full_collection_session and parsed.send_telegram):
         parser.error("--allow-historical-telegram-test requires --publish-full-collection-session and --send-telegram")
+    if parsed.full_universe:
+        if not (parsed.collect_recommendation_universe and parsed.allow_kiwoom_live):
+            parser.error("--full-universe requires --collect-recommendation-universe and --allow-kiwoom-live")
+        if parsed.plan_only == parsed.run_next_batch:
+            parser.error("--full-universe requires exactly one of --plan-only or --run-next-batch")
+        if not 1 <= parsed.price_batch_size <= 500:
+            parser.error("--price-batch-size must be between 1 and 500")
+        if not 1 <= parsed.flow_batch_size <= 120:
+            parser.error("--flow-batch-size must be between 1 and 120")
+    if parsed.replace_full_universe_snapshot and not parsed.build_full_universe_snapshot:
+        parser.error("--replace-full-universe-snapshot requires --build-full-universe-snapshot")
     return parsed
 
 
@@ -491,6 +515,45 @@ def run(
     """Assemble the connection runtime and keep the Qt event loop running."""
     options = parse_cli_arguments(arguments)
     project_root = Path(__file__).resolve().parents[2]
+    if options.validate_full_universe_snapshot_builder:
+        from qz_briefing.recommendations.full_universe_snapshot import (
+            print_snapshot_builder_validation, validate_full_universe_snapshot_builder,
+        )
+        result = validate_full_universe_snapshot_builder(); print_snapshot_builder_validation(result)
+        return 0 if result["success"] else 1
+    if options.build_full_universe_snapshot:
+        print("FULL_UNIVERSE_SNAPSHOT_MODE=1")
+        if not options.allow_kiwoom_live:
+            print("BLOCK_REASON=allow_kiwoom_live_required"); print("LIVE_TR_CALLS=0"); return 2
+        if not options.confirm_full_universe_snapshot_live:
+            print("BLOCK_REASON=confirm_full_universe_snapshot_live_required"); print("LIVE_TR_CALLS=0"); return 2
+        if any(os.environ.get(name) for name in ("CODEX_HOME", "CODEX_SANDBOX", "CODEX_THREAD_ID")):
+            print("BLOCK_REASON=live_snapshot_build_blocked_inside_codex")
+            print("LIVE_TR_CALLS=0"); return 2
+        from qz_briefing.recommendations.full_universe_snapshot import build_full_universe_snapshot
+        try:
+            result = build_full_universe_snapshot(project_root, replace=options.replace_full_universe_snapshot,
+                application_factory=application_factory, adapter_factory=adapter_factory,
+                manager_factory=manager_factory, clock=clock)
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, (RuntimeError, ValueError)) else type(exc).__name__
+            print(f"BLOCK_REASON={reason}")
+            print(f"SHUTDOWN_REASON={'login_failed' if reason == 'login_failed' else 'master_snapshot_failed'}")
+            print("COLLECTION_RESULT=incomplete"); print("LIVE_TR_CALLS=0")
+            print("ORDER_ACCOUNT_TR=0"); print("TELEGRAM_SENDS=0"); print("OPERATIONAL_WRITES=0"); print("DASHBOARD_STARTED=0")
+            return 2
+        payload = result["payload"]
+        print("LOGIN_SUCCESS=1"); print("CONNECT_STATE=1")
+        print(f"MASTER_CODES_TOTAL={payload['master_codes_total']}")
+        print(f"FILTERED_UNIVERSE_TOTAL={payload['filtered_universe_total']}")
+        print(f"EXCLUDED_TOTAL={payload['excluded_total']}")
+        print(f"DUPLICATES={payload['duplicates']}"); print(f"INVALID_CODES={payload['invalid_codes']}")
+        print(f"SNAPSHOT_PATH={result['path'].relative_to(project_root).as_posix()}")
+        print(f"SNAPSHOT_SHA256={payload['universe_hash']}")
+        print(f"MASTER_API_CALLS={result['master_api_calls']}"); print("LIVE_TR_CALLS=0")
+        print("ORDER_ACCOUNT_TR=0"); print("TELEGRAM_SENDS=0"); print("OPERATIONAL_WRITES=0"); print("DASHBOARD_STARTED=0")
+        print("SHUTDOWN_REASON=completed"); print("COLLECTION_RESULT=complete")
+        print("FULL UNIVERSE SNAPSHOT BUILD: PASS"); return 0
     if options.dashboard:
         try:
             selected_report_date = date.fromisoformat(options.report_date) if options.report_date else None
@@ -594,6 +657,13 @@ def run(
         except ValueError as exc:
             print(f"COLLECTION BLOCKED: {exc}")
             return 2
+    if options.validate_partitioned_full_universe_collection:
+        from qz_briefing.recommendations.partitioned_full_universe import (
+            print_partitioned_validation, validate_partitioned_full_universe_collection,
+        )
+        result = validate_partitioned_full_universe_collection()
+        print_partitioned_validation(result)
+        return 0 if result["success"] else 1
     if options.validate_full_universe_collection:
         from qz_briefing.recommendations.full_universe_collection import print_full_universe_validation, validate_full_universe_collection
         result = validate_full_universe_collection(project_root)
@@ -657,6 +727,62 @@ def run(
         print_publish_result(result)
         return 0 if result["success"] else 1
     if options.collect_recommendation_universe:
+        if options.full_universe:
+            if not options.confirm_full_universe_live:
+                print("FULL_UNIVERSE_MODE=1")
+                print("BLOCK_REASON=confirm_full_universe_live_required")
+                print("LIVE_TR_CALLS=0")
+                return 2
+            from qz_briefing.recommendations.partitioned_full_universe import (
+                ParentSymbol, create_parent_collection, generate_collection_id, load_universe_snapshot, partitioned_root,
+                verify_parent_collection,
+            )
+            if options.plan_only:
+                collection_id = options.collection_id or generate_collection_id(clock)
+                path = partitioned_root(project_root) / collection_id
+                try:
+                    snapshot_path = partitioned_root(project_root) / "universe.json"
+                    snapshot = load_universe_snapshot(snapshot_path)
+                    symbols = [ParentSymbol(str(item["market"]), str(item["code"]), str(item.get("name", "")))
+                               for item in snapshot["symbols"]]
+                    create_parent_collection(project_root, symbols, collection_id=collection_id,
+                        trade_date=date.fromisoformat(str(snapshot["trade_date"])),
+                        price_batch_size=options.price_batch_size, flow_batch_size=options.flow_batch_size,
+                        clock=clock)
+                    manifest, progress = verify_parent_collection(path)
+                except (OSError, KeyError, TypeError, json.JSONDecodeError, ValueError) as exc:
+                    print("FULL_UNIVERSE_MODE=1")
+                    print(f"BLOCK_REASON={exc}")
+                    print("LIVE_TR_CALLS=0")
+                    return 2
+                print("FULL_UNIVERSE_MODE=1")
+                print("PLAN_ONLY=1")
+                print(f"COLLECTION_ID={collection_id}")
+                print(f"UNIVERSE_TOTAL={manifest['universe_total']}")
+                print(f"PRICE_BATCH_SIZE={manifest['price_batch_size']}")
+                print(f"PRICE_BATCH_COUNT={len(manifest['price_batches'])}")
+                print(f"FLOW_BATCH_SIZE={manifest['flow_batch_size']}")
+                print(f"PARENT_PHASE={progress['phase']}")
+                print("LIVE_TR_CALLS=0")
+                print("FULL UNIVERSE PARTITIONED PLAN: PASS")
+                return 0
+            if not options.collection_id:
+                print("FULL_UNIVERSE_MODE=1")
+                print("BLOCK_REASON=collection_id_required")
+                print("LIVE_TR_CALLS=0")
+                return 2
+            path = partitioned_root(project_root) / options.collection_id
+            from qz_briefing.recommendations.partitioned_full_universe import run_partitioned_live_batch
+            try:
+                return run_partitioned_live_batch(project_root, collection_id=options.collection_id,
+                    repair=options.repair_failed, resume=options.resume is not None,
+                    application_factory=application_factory, adapter_factory=adapter_factory,
+                    manager_factory=manager_factory, queue_factory=tr_queue_factory)
+            except (RuntimeError, ValueError) as exc:
+                print("FULL_UNIVERSE_MODE=1")
+                print(f"BLOCK_REASON={exc}")
+                print("LIVE_TR_CALLS=0")
+                return 2
         from qz_briefing.recommendations.full_universe_collection import run_full_collection_plan
         try:
             return run_full_collection_plan(

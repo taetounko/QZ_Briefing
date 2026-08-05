@@ -212,8 +212,10 @@ def test_required_readonly_tab_contract_and_order(tmp_path):
 def test_structured_premarket_sections_are_independent_and_market_safe(tmp_path):
     window=readonly_window_with_premarket(tmp_path)
     pre=window._result_views["pre_market"].toPlainText(); kospi=table_text(window._leader_views["kospi"]); kosdaq=table_text(window._leader_views["kosdaq"]); holdings=widget_text(window._readonly_holdings)
-    assert "장전 중립" in pre and "독립 탭" in pre
-    assert all(value not in pre for value in ("코스피가상1","코스닥가상1","보유가상1","MARKDOWN_SHOULD_NOT_BE_PARSED"))
+    assert "장전 중립" in pre and "코스피 주도주 TOP 10" in pre and "코스닥 주도주 TOP 10" in pre
+    assert "반등 후보" in pre and "보유종목 긴급 확인" in pre and "누락·오류·stale 자료" in pre
+    assert "코스피가상1" in pre and "코스닥가상1" in pre and "보유가상1" in pre
+    assert "MARKDOWN_SHOULD_NOT_BE_PARSED" not in pre
     assert kospi.count("코스피가상1")==1 and "코스닥가상1" not in kospi and "잘못혼합" not in kospi
     assert "코스닥가상1" in kosdaq and "코스피가상1" not in kosdaq
     assert "보유가상1" in holdings and "보유가상2" in holdings and "마지막 저장 자료" in holdings

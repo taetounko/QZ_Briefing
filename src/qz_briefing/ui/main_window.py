@@ -303,10 +303,51 @@ class DashboardMainWindow(QMainWindow):
             decision = analysis.get("decision") if isinstance(analysis.get("decision"), dict) else {}
             previous = payload.get("previous_market_close") if isinstance(payload.get("previous_market_close"), dict) else {}
             previous_analysis = previous.get("market_close_analysis") if isinstance(previous.get("market_close_analysis"), dict) else {}
-            prior = previous_analysis.get("market_conclusion") or "전일 장마감 자료 부족"
+            prior = (
+                "전일 장마감 자료 없음"
+                if payload.get("PREVIOUS_CLOSE_STATUS") in {"stale", "unavailable"}
+                else previous_analysis.get("market_conclusion") or "전일 장마감 자료 부족"
+            )
             flows = f'외국인 {escape(str(projected.get("외국인") or "자료 부족"))}<br>기관 {escape(str(projected.get("기관") or "자료 부족"))}<br>프로그램 {escape(str(projected.get("프로그램") or "자료 부족"))}'
             confidence = decision.get("confidence") or analysis.get("confidence") or "자료 부족"
-            body = f"<p><b>생성 시각</b> {escape(str(generated))}</p>" + self._card("전일 국내시장", escape(str(prior))) + self._card("장전 시장 방향", escape(str(summary))) + self._card("핵심 수급", flows) + self._card("주요 위험", escape(str(risk))) + self._card("오늘의 대응", escape(str(response))) + self._card("판단 신뢰도·기준 시각", f'{escape(str(confidence))}<br>{escape(str(generated))}') + '<p>코스피·코스닥 주도주와 보유종목 상세는 각각의 독립 탭에서 확인할 수 있습니다.</p>'
+            score = analysis.get("score")
+            confidence_text = f"판단 신뢰도 {score}/100" if isinstance(score, (int, float)) else f"판단 신뢰도 {status_label(confidence)}"
+            quality = payload.get("BRIEFING_QUALITY") or payload.get("DATA_QUALITY") or "unknown"
+            quality_text = {"complete":"정상", "partial":"일부 자료 부족", "unavailable":"핵심 자료 미완료"}.get(str(quality), "자료 부족")
+            leadership = payload.get("leadership") if isinstance(payload.get("leadership"), dict) else {}
+            def leader_section(title, rows):
+                values=[]
+                for item in (rows if isinstance(rows, list) else [])[:10]:
+                    if not isinstance(item, dict): continue
+                    rank=item.get("trading_value_rank"); elapsed=item.get("seconds_after_open")
+                    values.append(
+                        f"<li>{escape(str(item.get('name') or item.get('code') or '자료 부족'))} · "
+                        f"등락률 {percent(item.get('change_rate'))} · 거래대금 {money(item.get('trading_value'))}원 · "
+                        f"거래대금 순위 {escape(str(rank)) if rank is not None else '자료 부족'} · "
+                        f"수집 {escape(str(item.get('collected_at') or '자료 부족'))} · 개장 후 {escape(str(elapsed)) if elapsed is not None else '자료 부족'}초 · "
+                        f"신뢰도 {escape(status_label(item.get('confidence')))} · 초기 장세 변동 위험 {'있음' if item.get('early_session_volatility_risk') else '낮음'}</li>"
+                    )
+                return f"<h3>{escape(title)}</h3><ol>{''.join(values) or '<li>자료 부족</li>'}</ol>"
+            rebounds = leader_section("반등 후보", leadership.get("rebound_candidates", []))
+            holdings = payload.get("holdings_analysis") if isinstance(payload.get("holdings_analysis"), dict) else {}
+            urgent=[]
+            for item in holdings.get("holdings", []) if isinstance(holdings.get("holdings"), list) else []:
+                if isinstance(item, dict):
+                    urgent.append(f"<li>{escape(str(item.get('name') or item.get('code') or '자료 부족'))} · {escape(status_label(item.get('review_status')))}</li>")
+            omissions = [*payload.get("warnings", []), *payload.get("errors", [])]
+            if payload.get("PREVIOUS_CLOSE_STATUS") == "stale": omissions.append("전일 장마감 자료 없음 (stale 자료 제외)")
+            body = (
+                f"<h3>1. 데이터 품질과 생성 시각</h3><p>{escape(quality_text)} · {escape(str(generated))}</p>"
+                f"<h3>2. 오늘의 결론</h3><p>{escape(str(summary))}<br>{escape(confidence_text)}</p>"
+                + self._card("3. 지수·대형주", escape(str(analysis.get('indicator_comments', {}).get('market_indices') or '자료 부족')))
+                + self._card("4. 외국인·기관·프로그램 수급", flows)
+                + leader_section("5. 코스피 주도주 TOP 10", leadership.get("kospi", []))
+                + leader_section("6. 코스닥 주도주 TOP 10", leadership.get("kosdaq", []))
+                + f"<h3>7. 반등 후보</h3>{rebounds.split('</h3>',1)[-1]}"
+                + f"<h3>8. 보유종목 긴급 확인</h3><ul>{''.join(urgent) or '<li>자료 부족</li>'}</ul>"
+                + f"<h3>9. 누락·오류·stale 자료</h3><ul>{''.join(f'<li>{escape(str(x))}</li>' for x in omissions) or '<li>없음</li>'}</ul>"
+                + f"<p><b>전일 국내시장</b> {escape(str(prior))}</p><p><b>오늘의 대응</b> {escape(str(response))}</p>"
+            )
         else:
             body = f"<p><b>생성 시각</b> {escape(str(generated))}</p>" + self._card("시장 요약", escape(str(summary))) + self._card("주요 위험", escape(str(risk))) + self._card("대응", escape(str(response))) + self._card("종목 목록", stocks)
         if markdown and key != "pre_market":

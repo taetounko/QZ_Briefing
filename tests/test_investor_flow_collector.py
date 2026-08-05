@@ -116,7 +116,7 @@ def test_kospi_failure_does_not_stop_kosdaq_and_marks_partial_error(
         market_calendar_status="open",
         market_calendar_reason="weekday",
     )
-    assert result.status == "completed_with_errors"
+    assert result.status == "incomplete"
 
 
 def test_korean_investor_names_are_saved_as_utf8_json(tmp_path: Path) -> None:

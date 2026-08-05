@@ -80,7 +80,10 @@ def review_state(
     if stop_breached or bottom == "failed": return "exit_review"
     if trend == "strong_downtrend": return "averaging_down_high_risk" if profit_rate < 0 else "reduce_risk"
     if trend == "downtrend": return "wait"
-    if profit_rate < 0 and bottom in {"partially_confirmed", "confirmed"} and above_ma20: return "averaging_down_candidate"
+    if profit_rate < 0 and bottom in {"partially_confirmed", "confirmed"} and above_ma20:
+        # A technical bottom alone cannot establish volume, invalidation, risk/reward,
+        # and verified flow/material conditions required for an add decision.
+        return "hold_and_monitor" if (volume_multiple or 0) >= 1.2 else "additional_data_required"
     if profit_rate > 0 and trend in {"uptrend", "strong_uptrend"} and above_ma20 and (volume_multiple or 0) >= 1.2 and leadership: return "add_on_strength_candidate"
     return "no_action"
 

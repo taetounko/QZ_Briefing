@@ -156,7 +156,7 @@ def test_partial_index_failure_marks_pipeline_completed_with_errors(
         market_calendar_status="open",
         market_calendar_reason="weekday",
     )
-    assert result.status == "completed_with_errors"
+    assert result.status == "incomplete"
 
 
 def test_korean_market_names_and_fields_are_saved_in_json(tmp_path: Path) -> None:

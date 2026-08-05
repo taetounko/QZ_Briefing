@@ -20,6 +20,8 @@ STATUS_LABELS = {
     "do_not_add": "추가매수 금지", "observe_only": "관찰만",
     "conditional_add_review": "조건 충족 시 추가매수 검토",
     "hold_and_monitor": "보유하며 관찰", "protect_profit": "수익 보호",
+    "additional_data_required": "추가 자료 확인 필요",
+    "neutral": "중립", "medium": "보통", "unknown": "자료 부족",
     "reduce_risk": "위험 축소 검토", "exit_condition_check": "이탈 조건 확인",
 }
 

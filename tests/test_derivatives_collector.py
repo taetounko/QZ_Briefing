@@ -194,7 +194,7 @@ def test_program_failure_keeps_futures_and_marks_pipeline_error(tmp_path: Path) 
         BriefingType.PRE_MARKET, DAY,
         market_calendar_status="open", market_calendar_reason="weekday",
     )
-    assert result.status == "completed_with_errors"
+    assert result.status == "incomplete"
 
 
 def test_korean_derivatives_json_is_utf8(tmp_path: Path) -> None:

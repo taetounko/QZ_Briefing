@@ -108,6 +108,8 @@ def test_pre_market_links_latest_close_and_marks_stale(tmp_path: Path) -> None:
     markdown = Path(run.markdown_path).read_text(encoding="utf-8")
     assert saved["previous_market_close"]["trading_date"] == old.isoformat()
     assert any("stale" in warning for warning in saved["warnings"])
+    assert saved["PREVIOUS_CLOSE_STATUS"] == "stale"
+    assert saved["PREVIOUS_CLOSE_USED"] == 0
     assert "전 거래일 장마감 요약" in markdown
 
 

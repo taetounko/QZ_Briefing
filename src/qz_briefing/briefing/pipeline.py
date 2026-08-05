@@ -22,6 +22,7 @@ from .models import (
 )
 from .renderer import render_markdown
 from .decision_guidance import holding_decision, market_decision, priority
+from .quality import evaluate_pre_market_quality, unavailable_analysis
 from .storage import BriefingStorage
 
 
@@ -201,9 +202,24 @@ class DailyBriefingPipeline:
                 intraday_source = self._load_same_day_result(
                     context, BriefingType.INTRADAY_10AM, "intraday"
                 )
+            quality = None
+            has_market_collectors = any(name in collector_results for name in (
+                "kiwoom_core_market", "kiwoom_market_indices",
+                "kiwoom_investor_flows", "kiwoom_derivatives_flows",
+                "kiwoom_market_leadership",
+            ))
+            if briefing_type is BriefingType.PRE_MARKET and not no_market_open and has_market_collectors:
+                quality = evaluate_pre_market_quality(result)
+                result["data_quality"] = quality
+                result["DATA_QUALITY"] = quality["DATA_QUALITY"]
+                result["BRIEFING_QUALITY"] = quality["BRIEFING_QUALITY"]
+                status = str(quality["status"])
+                result["status"] = status
             result["analysis"] = (
                 {"market_state": "market_not_open", "summary": result["message"], "warnings": list(context.warnings), "decision": market_decision(result)}
-                if no_market_open else analyze_briefing(result, intraday_source or pre_market_source)
+                if no_market_open else unavailable_analysis(quality)
+                if quality and not quality["market_score_allowed"]
+                else analyze_briefing(result, intraday_source or pre_market_source)
             )
             leadership_result = collector_results.get("kiwoom_market_leadership")
             if isinstance(leadership_result, dict) and isinstance(
@@ -289,6 +305,14 @@ class DailyBriefingPipeline:
                 result["previous_market_close"] = previous_close
                 if warning:
                     context.warnings.append(warning)
+                    result["PREVIOUS_CLOSE_STATUS"] = "stale"
+                    result["PREVIOUS_CLOSE_USED"] = 0
+                elif previous_close:
+                    result["PREVIOUS_CLOSE_STATUS"] = "available"
+                    result["PREVIOUS_CLOSE_USED"] = 1
+                else:
+                    result["PREVIOUS_CLOSE_STATUS"] = "unavailable"
+                    result["PREVIOUS_CLOSE_USED"] = 0
             if self._recommendation_provider is not None:
                 try:
                     recommendations=self._recommendation_provider(briefing_type.value,trading_date)
@@ -426,6 +450,15 @@ def build_leadership_output(
     source: dict[str, object], market_rates: dict[str, float | None]
 ) -> dict[str, object]:
     output = copy.deepcopy(source)
+    collected_at = output.get("collected_at")
+    elapsed_seconds = None
+    if isinstance(collected_at, str):
+        try:
+            moment = datetime.fromisoformat(collected_at)
+            opened = moment.replace(hour=9, minute=0, second=0, microsecond=0)
+            elapsed_seconds = max(0, int((moment - opened).total_seconds()))
+        except ValueError:
+            pass
     for key, market in (("kospi", "KOSPI"), ("kosdaq", "KOSDAQ")):
         rows = output.get(key, [])
         if not isinstance(rows, list):
@@ -440,6 +473,16 @@ def build_leadership_output(
         )
         for rank, row in enumerate(rescored[:10], 1):
             row["rank"] = rank
+            row["collected_at"] = collected_at
+            row["seconds_after_open"] = elapsed_seconds
+            row["early_session_volatility_risk"] = bool(
+                elapsed_seconds is not None and elapsed_seconds < 300
+            )
+            if row.get("trading_value_rank") is None:
+                row["confidence"] = "low"
+                row.setdefault("warnings", []).append(
+                    "거래대금 순위가 없어 TOP 10 신뢰도를 낮춤"
+                )
         output[key] = rescored[:10]
     return output
 

@@ -112,7 +112,7 @@ def test_review_rules_prevent_simple_cheap_averaging_and_cover_risk_states() -> 
     assert review_state(trend="strong_downtrend", **base) == "averaging_down_high_risk"
     assert review_state(trend="downtrend", **base) == "wait"
     candidate = {**base, "bottom": "confirmed", "above_ma20": True}
-    assert review_state(trend="sideways", **candidate) == "averaging_down_candidate"
+    assert review_state(trend="sideways", **candidate) == "additional_data_required"
     strength = dict(profit_rate=10, trend="uptrend", bottom="not_confirmed", above_ma20=True, volume_multiple=1.5, leadership=True, stop_breached=False)
     assert review_state(**strength) == "add_on_strength_candidate"
     assert review_state(**{**strength, "stop_breached": True}) == "exit_review"
